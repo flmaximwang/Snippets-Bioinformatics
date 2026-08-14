@@ -14,3 +14,7 @@ Sync — overwrites same-named files only, never deletes anything:
 
 Current source is recorded in scripts/protenix2_upstream.ref
 (after sync, review `git status` and commit manually).
+
+## Dependencies
+
+Get `biorazer` from Github.
