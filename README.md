@@ -31,6 +31,44 @@ Workflow doc: `batch/scripts/README.md` (5 steps, full pipeline details).
 `batch/scripts/renumber_protein_structure_file.py` is a symlink to
 `snippet/renumber_protein_structure_files.py` (same file, no duplication).
 
+## Rosetta FastDesign two-body perturbation (pipelines/fastdesign-two-body)
+
+Batch Rosetta FastDesign around an initial pose for a two-fragment assembly.
+Prepares each input PDB as a trimmed single-chain model, writes a two-fragment
+fold tree (inter-fragment jump movable), applies RigidBodyPerturbNoCenter, then
+FastDesign with only the design positions' chi and the inter-fragment jump
+movable — all other residues frozen.
+
+Files in `pipelines/fastdesign-two-body/scripts/`:
+
+- `run_fastdesign_batch.py` — trim + fold-tree + design-position mapping, then
+  multiprocessing launcher for `rosetta_scripts`. Task parameters are all CLI
+  args (no hardcoded defaults; `--dry-run` prints jobs without launching).
+- `fastdesign_two_body.xml` — RosettaScripts protocol. Design positions are
+  passed via `design_positions`/`aa_allowed`; each fragment-1 design resid maps
+  to a fragment-2 partner at `resid + 100` (missing partners skipped with a
+  warning).
+- `FASTDESIGN_USAGE.md` — usage doc with a full example command.
+
+Run from `pipelines/fastdesign-two-body/scripts/`:
+
+    python run_fastdesign_batch.py \
+      --inputs comparison_107_83.pdb \
+      --xml fastdesign_two_body.xml \
+      --rosetta-dir /path/to/rosetta.source.release-408 \
+      --outdir fastdesign_runs \
+      --nstruct 50 --jobs 8 \
+      --design-resids 6,7,10,11,13,14,17,18,21,24,25,28,32,35,37,39,40,43,44,47,50,51,54,57,58,61,65 \
+      --fragment1 1-79 --fragment2 107-179 \
+      --suffix _fd --extra-flags -in:file:fullatom -ex1 -ex2aro
+
+Deps: `biorazer` env (`biorazer_ex.apps.rosetta.execution.RosettaApp`) and a
+Rosetta source release (runs its `rosetta_scripts` binary).
+
+Outputs: `prepared_inputs/<stem>.prepared.pdb` + `<stem>.fold_tree.txt`,
+per-decoy dirs with PDB + scorefile + `rosetta.log`/`rosetta.err`,
+`run_config.json`, `run_summary.json`.
+
 ## Dependencies
 
 Get `biorazer` from Github.

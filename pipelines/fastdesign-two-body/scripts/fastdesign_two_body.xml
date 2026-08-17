@@ -1,0 +1,62 @@
+<ROSETTASCRIPTS>
+    <SCOREFXNS>
+        <ScoreFunction name="ref2015" weights="ref2015">
+        </ScoreFunction>
+    </SCOREFXNS>
+
+    <RESIDUE_SELECTORS>
+        <Index name="design_positions" resnums="%%design_positions%%" />
+        <Not name="non_design_positions" selector="design_positions" />
+    </RESIDUE_SELECTORS>
+
+    <TASKOPERATIONS>
+        <InitializeFromCommandline name="ifcl" />
+        <IncludeCurrent name="include_current" />
+        <ExtraRotamersGeneric name="ex1_ex2" ex1="1" ex2="1" />
+        <LimitAromaChi2 name="limit_arochi2" />
+        <OperateOnResidueSubset name="restrict_design_aas" selector="design_positions">
+            <RestrictAbsentCanonicalAASRLT aas="%%aa_allowed%%" />
+        </OperateOnResidueSubset>
+        <OperateOnResidueSubset name="freeze_non_design" selector="non_design_positions">
+            <PreventRepackingRLT />
+        </OperateOnResidueSubset>
+    </TASKOPERATIONS>
+
+    <JUMP_SELECTORS>
+        <JumpIndex name="interchain_jump" jump="1" />
+    </JUMP_SELECTORS>
+
+    <MOVE_MAP_FACTORIES>
+        <MoveMapFactory name="design_with_rigid_body" bb="false" chi="false" jumps="false">
+            <Chi residue_selector="design_positions" enable="true" />
+            <Jumps jump_selector="interchain_jump" enable="true" />
+        </MoveMapFactory>
+    </MOVE_MAP_FACTORIES>
+
+    <MOVERS>
+        <AtomTree name="set_fold_tree" fold_tree_file="%%fold_tree_file%%" />
+        <RigidBodyPerturbNoCenter
+            name="perturb_rigid_body"
+            rot_mag="%%rb_rotation%%"
+            trans_mag="%%rb_translation%%" />
+        <FastDesign
+            name="fastdesign"
+            scorefxn="ref2015"
+            repeats="%%fastdesign_repeats%%"
+            cartesian="false"
+            task_operations="ifcl,include_current,ex1_ex2,limit_arochi2,restrict_design_aas,freeze_non_design"
+            movemap_factory="design_with_rigid_body"
+            ramp_down_constraints="false"
+            bondangle="false"
+            bondlength="false"
+            min_type="lbfgs_armijo_nonmonotone" />
+    </MOVERS>
+
+    <PROTOCOLS>
+        <Add mover="set_fold_tree" />
+        <Add mover="perturb_rigid_body" />
+        <Add mover="fastdesign" />
+    </PROTOCOLS>
+
+    <OUTPUT scorefxn="ref2015" />
+</ROSETTASCRIPTS>
