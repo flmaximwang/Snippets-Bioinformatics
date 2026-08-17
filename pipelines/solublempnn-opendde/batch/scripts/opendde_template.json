@@ -1,0 +1,15 @@
+[
+    {
+        "sequences": [
+            {
+                "proteinChain": {
+                    "sequence": "",
+                    "count": 1,
+                    "pairedMsaPath": "",
+                    "unpairedMsaPath": ""
+                }
+            }
+        ],
+        "name": "candidate-8.n.0"
+    }
+]
