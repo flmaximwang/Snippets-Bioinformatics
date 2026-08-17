@@ -27,7 +27,7 @@ Run from `pipelines/solublempnn-opendde/batch/`:
     bash scripts/main.sh
 
 Deps: micromamba envs /opt/envs/{ProteinMPNN,BioRazer,OpenDDE}.
-Workflow doc: `batch/scripts/AGENTS.md` (5 steps).
+Workflow doc: `batch/scripts/README.md` (5 steps, full pipeline details).
 `batch/scripts/renumber_protein_structure_file.py` is a symlink to
 `snippet/renumber_protein_structure_files.py` (same file, no duplication).
 

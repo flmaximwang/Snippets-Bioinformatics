@@ -2,7 +2,7 @@
 # =====================================================================
 # main_v8-0-0.sh - SolubleMPNN → colabfold-msa → OpenDDE → 一致性检查
 #
-# 按 AGENTS.md 的 5 步流程, 迭代生成 candidate-8.n.0:
+# 按 README.md 的 5 步流程, 迭代生成 candidate-8.n.0:
 #   1. SolubleMPNN 生成一条设计序列 (seed = SEED_BASE + n)
 #   2. 按模板切分位置切成 3 片段 (1-79 : 80-85 : 86-158, 片段用设计序列自身残基)
 #      提交 colabfold-msa (--pair-mode paired, 无 template)
