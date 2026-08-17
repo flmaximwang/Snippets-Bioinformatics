@@ -1,6 +1,24 @@
 # Snippets-Bioinformatics
 My snippets for bioinformatics
 
+## PyMOL alignment pitfalls (docs/pymol)
+
+PyMOL 3.x `align`/`super`/`extra_fit` cannot align two selections that share an
+object — the C layer builds the target residue list with the mobile object as
+`exclude`, so any same-object alignment (even `align(obj and c. B, obj and c. A)`)
+is `invalid selections for alignment`.
+
+`extra_fit`'s `reference` argument must be a **bare object name** (it is compared
+by string equality to remove the reference from its per-object loop). To align
+onto a specific chain, exclude the reference from the mobile selection:
+
+    extra_fit * and not ref_obj, ref_obj and c. A, method=align, cycles=5, cutoff=2.0
+
+Same-object chain superposition: use `pair_fit` (`fit`/`align`/`super` all fail).
+
+Full root-cause analysis + verified working command on RPXDock poses:
+`docs/pymol/extra-fit-alignment.md`.
+
 ## Protenix2 docs (docs/protenix2)
 
 Vendored from bytedance/Protenix: `docs/infer_json_format.md` + `examples/`
