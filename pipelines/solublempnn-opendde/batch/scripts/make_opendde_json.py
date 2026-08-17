@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """make_opendde_json.py - 基于 opendde_template.json 生成单个 candidate 的 OpenDDE 输入。
 
-按 AGENTS.md: paired.a3m 放 unpairedMsaPath, single.a3m 放 pairedMsaPath。
+按 README.md: paired.a3m 放 unpairedMsaPath, single.a3m 放 pairedMsaPath。
 不填 templatesPath (本阶段不用 template)。sequence 必须与 MSA query 一致。
 """
 import argparse

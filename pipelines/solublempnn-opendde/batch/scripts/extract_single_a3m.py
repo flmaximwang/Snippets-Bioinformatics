@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """extract_single_a3m.py - 提取 paired.a3m 的第一条记录(query)为 single.a3m。
 
-OpenDDE 的 pairedMsaPath 需要 query-only 的 a3m (AGENTS.md Step 2:
+OpenDDE 的 pairedMsaPath 需要 query-only 的 a3m (README.md Step 2:
 "Extract the first sequence (query) to single.a3m")。
 """
 import argparse
