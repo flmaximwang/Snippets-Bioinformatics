@@ -1,11 +1,11 @@
 #!/bin/bash
 # Build a MASTER structural-search database from the local RCSB PDB archive.
 # Input:  <rcsb>/{aa}/pdbXXXX.ent.gz   (gzipped PDB, divided layout)
-#         <out>/pdb/            decompressed plain-text PDB
+# Output: <out>/pdb/            decompressed plain-text PDB (*.pdb)
 #         <out>/pdb_filtered/   PDBs containing >=1 MASTER-supported residue
 #         <out>/pds/            createPDS target PDS files (the actual database)
-#         <out>/pdb_filtered_list.txt  filtered PDB list for createPDS (absolute paths)
-#         <out>/target_list.txt --targetList for master (absolute paths)
+#         <out>/pdb_filtered_list.txt  createPDS --pdbList (absolute paths)
+#         <out>/target_list.txt createPDS --pdsList & master --targetList (absolute paths)
 #
 # createPDS only reads *uncompressed* PDB text, so gz files must be decompressed
 # first. Steps are idempotent: rerunning skips already-done work.
@@ -21,7 +21,7 @@
 # Usage:
 #   bash create_master_db.sh --rcsb <SRC> --out <OUT> \
 #                            [--no-cleanPDB] [--dCut X --dStep X --phiStep X --psiStep X] \
-#                            {decompress|filter|gen_pdb_list|build|gen_pds_list|verify|all}
+#                            {decompress|filter|gen_list|build|verify|all}
 #
 # Required (no default): --rcsb, --out
 # Expert (default):       --dCut 25.0 --dStep 5.0 --phiStep 10.0 --psiStep 10.0
@@ -49,7 +49,7 @@ ACTION=""
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --rcsb <SRC> --out <OUT> [options] {decompress|filter|gen_pdb_list|build|gen_pds_list|verify|all}
+Usage: $0 --rcsb <SRC> --out <OUT> [options] {decompress|filter|gen_list|build|verify|all}
 
 Required:
   --rcsb <SRC>       source gz PDB archive (divided layout, e.g. .../RCSB)
@@ -65,13 +65,12 @@ Other:
   --no-cleanPDB      disable --cleanPDB (default: ON)
 
 Action:
-  decompress         gunzip .ent.gz -> out/pdb
+  decompress         gunzip .ent.gz -> out/pdb/*.pdb
   filter             keep PDBs w/ any MASTER-supported residue -> out/pdb_filtered
-  gen_pdb_list       list filtered PDBs -> out/pdb_filtered_list.txt
-  build              createPDS pdb_filtered_list.txt -> out/pds
-  gen_pds_list       list PDS targets -> out/target_list.txt
+  gen_list           write pdb_filtered_list.txt + target_list.txt (before build)
+  build              createPDS (via both lists) -> out/pds/*.pds
   verify             compare PDS count vs target_list count
-  all                decompress + filter + gen_pdb_list + build + gen_pds_list + verify
+  all                decompress + filter + gen_list + build + verify
 
 Notes:
   createPDS must be on PATH (MASTER install, e.g. /usr/local/bin).
@@ -89,7 +88,7 @@ while [ $# -gt 0 ]; do
         --dStep)       DSTEP="$2"; shift 2 ;;
         --phiStep)     PHISTEP="$2"; shift 2 ;;
         --psiStep)     PSISTEP="$2"; shift 2 ;;
-        decompress|filter|gen_pdb_list|build|gen_pds_list|verify|all) ACTION="$1"; shift ;;
+        decompress|filter|gen_list|build|verify|all) ACTION="$1"; shift ;;
         -h|--help)     usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -140,9 +139,9 @@ decompress() {
     find "$RCSB_DIR" -name '*.ent.gz' -print0 | \
     xargs -0 -P "$NJOBS" -n1 bash -c '
         f="$1"
-        id=$(basename "$f" .ent.gz)
-        [ -f "$PDB_DIR/$id" ] && exit 0          # 目标已存在 → 跳过
-        gunzip -c "$f" > "$PDB_DIR/$id"
+        out="$PDB_DIR/$(basename "$f" .ent.gz).pdb"
+        [ -f "$out" ] && exit 0                  # 目标已存在 → 跳过
+        gunzip -c "$f" > "$out"
     ' _
 
     local n; n=$(find "$RCSB_DIR" -name '*.ent.gz' | wc -l)
@@ -183,40 +182,43 @@ filter() {
     log "  $n PDBs kept in $PDB_FILTERED."
 }
 
-# ---------------- action: gen_pdb_list (write filtered PDB list) ----------------
-gen_pdb_list() {
+# ---------------- action: gen_list (write the 2 lists createPDS needs) ----------------
+# Runs BEFORE build. Writes:
+#   pdb_filtered_list.txt -> createPDS --pdbList (input PDBs, absolute paths)
+#   target_list.txt       -> createPDS --pdsList (output .pds paths into out/pds,
+#                           one per input), and doubles as master's --targetList.
+gen_list() {
     if [ ! -d "$PDB_FILTERED" ]; then
         log "ERROR: $PDB_FILTERED missing. Run: $0 ... filter first." >&2
         exit 1
     fi
-    # PDB_FILTERED is absolute -> lines written here are absolute, so createPDS
-    # can open them no matter where it runs.
-    log "Writing $PDB_FILTERED_LIST"
-    find "$PDB_FILTERED" -maxdepth 1 -type f | sort > "$PDB_FILTERED_LIST"
-    log "  $(wc -l < "$PDB_FILTERED_LIST") filtered PDB files listed."
+    mkdir -p "$PDS_DIR"
+    # PDB_FILTERED is absolute -> lines written here are absolute.
+    log "Writing $PDB_FILTERED_LIST (createPDS --pdbList inputs)"
+    find "$PDB_FILTERED" -maxdepth 1 -type f -name '*.pdb' | sort > "$PDB_FILTERED_LIST"
+    # Derive each output .pds path: same basename, in PDS_DIR, .pdb -> .pds.
+    log "Writing $TARGET_LIST (createPDS --pdsList outputs / master --targetList)"
+    awk -v fd="$PDB_FILTERED/" -v pds="$PDS_DIR" '
+        { base=$0; sub("^" fd, "", base); sub(/\.pdb$/, "", base); print pds "/" base ".pds" }
+    ' "$PDB_FILTERED_LIST" > "$TARGET_LIST"
+    log "  $(wc -l < "$PDB_FILTERED_LIST") PDB inputs, $(wc -l < "$TARGET_LIST") PDS outputs."
 }
 
 # ---------------- action: build (convert to PDS) ----------------
 build() {
-    if [ ! -s "$PDB_FILTERED_LIST" ]; then
-        log "ERROR: $PDB_FILTERED_LIST empty/missing. Run: $0 ... gen_pdb_list first." >&2
+    if [ ! -s "$PDB_FILTERED_LIST" ] || [ ! -s "$TARGET_LIST" ]; then
+        log "ERROR: $PDB_FILTERED_LIST or $TARGET_LIST missing/empty. Run: $0 ... gen_list first." >&2
         exit 1
     fi
     log "Converting PDB -> PDS (target) into $PDS_DIR/ (cleanPDB='${CLEAN_PDB:-off}')"
-    # createPDS writes each .pds in cwd, naming from the PDB base name + .pds.
-    # Run from $PDS_DIR so outputs land here.
+    # Output .pds paths come from --pdsList (target_list.txt), so createPDS writes
+    # them into $PDS_DIR regardless of cwd.
     ( cd "$PDS_DIR" && \
-      "$CREATEPDS" --type target --pdbList "$PDB_FILTERED_LIST" \
+      "$CREATEPDS" --type target \
+                   --pdbList "$PDB_FILTERED_LIST" --pdsList "$TARGET_LIST" \
                    --dCut "$DCUT" --dStep "$DSTEP" \
                    --phiStep "$PHISTEP" --psiStep "$PSISTEP" \
                    $CLEAN_PDB )
-}
-
-# ---------------- action: gen_pds_list (write PDS target list) ----------------
-gen_pds_list() {
-    log "Writing $TARGET_LIST"
-    find "$PDS_DIR" -maxdepth 1 -type f -name '*.pds' | sort > "$TARGET_LIST"
-    log "  $(wc -l < "$TARGET_LIST") PDS target files."
 }
 
 # ---------------- action: verify counts ----------------
@@ -232,12 +234,11 @@ verify() {
 
 # ---------------- dispatch ----------------
 case "$ACTION" in
-    decompress)   decompress ;;
-    filter)       filter ;;
-    gen_pdb_list) gen_pdb_list ;;
-    build)        build ;;
-    gen_pds_list) gen_pds_list ;;
-    verify)       verify ;;
-    all)          decompress; filter; gen_pdb_list; build; gen_pds_list; verify ;;
-    *)            usage; exit 1 ;;   # unreachable (validated above)
+    decompress) decompress ;;
+    filter)     filter ;;
+    gen_list)   gen_list ;;
+    build)      build ;;
+    verify)     verify ;;
+    all)        decompress; filter; gen_list; build; verify ;;
+    *)          usage; exit 1 ;;   # unreachable (validated above)
 esac
