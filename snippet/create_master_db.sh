@@ -104,17 +104,27 @@ log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
 # ---------------- action: decompress ----------------
 decompress() {
-    log "Decompressing $RCSB_DIR/*/*.ent.gz -> $PDB_DIR/"
-    local n=0
-    for f in "$RCSB_DIR"/*/*.ent.gz; do
-        [ -e "$f" ] || continue
-        local id; id=$(basename "$f" .ent.gz)     # e.g. pdb112d
-        if [ ! -f "$PDB_DIR/$id" ]; then
-            gunzip -c "$f" > "$PDB_DIR/$id"
-        fi
-        n=$((n+1))
-    done
-    log "Processed $n gz entries."
+    local NJOBS; NJOBS=${NJOBS:-$(nproc)}     # 这台 nproc=32,SSD 可直接跑满
+    log "Decompressing $RCSB_DIR/*/*.ent.gz -> $PDB_DIR/  ($NJOBS 并行)"
+    mkdir -p "$PDB_DIR"
+
+    # 已存在则跳过:只在入口过滤,worker 最简
+    (
+        for f in "$RCSB_DIR"/*/*.ent.gz; do
+            [ -e "$f" ] || continue
+            local id; id=$(basename "$f" .ent.gz)
+            [ -f "$PDB_DIR/$id" ] && continue      # 目标已存在 → 跳过
+            printf '%s\n' "$f"
+        done
+    ) | xargs -P "$NJOBS" -d '\n' -I{} bash -c '
+        f="$1"
+        gunzip -c "$f" > "$OUT/$(basename "$f" .ent.gz)"
+    ' _ {}
+
+    local n; n=$(find "$RCSB_DIR" -name '*.ent.gz' | wc -l)
+    log "Processed $n gz entries (含已存在跳过)."
+
+    wait
     log "Writing $PDB_LIST"
     find "$PDB_DIR" -maxdepth 1 -type f | sort > "$PDB_LIST"
     log "  $(wc -l < "$PDB_LIST") uncompressed PDB files listed."
