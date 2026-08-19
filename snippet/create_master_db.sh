@@ -110,9 +110,9 @@ fi
 CREATEPDS="$(command -v createPDS)"
 
 # ---------------- canonicalize to absolute paths ----------------
-# Both inputs become absolute, so every derived path — PDB_DIR, PDB_LIST,
-# TARGET_LIST, the *.pds outputs, and the lines written insde pdb_list.txt /
-# target_list.txt — is absolute. Relative --rcsb/--out work regardless of cwd.
+# Both inputs become absolute, so every derived path — PDB_DIR, PDB_FILTERED,
+# PDB_FILTERED_LIST, TARGET_LIST, the *.pds outputs, and the lines written
+# inside pdb_filtered_list.txt / target_list.txt — is absolute. Relative --rcsb/--out work regardless of cwd.
 RCSB_DIR="$(cd "$RCSB_DIR" && pwd)"
 MASTERDIR="$(cd "$MASTERDIR" && pwd)"
 
