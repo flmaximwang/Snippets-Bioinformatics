@@ -34,7 +34,7 @@ def main():
         with open(path) as f:
             content = f.read()
         with open(path.with_suffix(".tsv"), "w") as f:
-            content.write(HEADER + "\n" + content)
+            f.write(HEADER + "\n" + content)
 
 if __name__ == "__main__":
     main()
