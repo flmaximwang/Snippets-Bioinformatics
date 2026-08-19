@@ -1,20 +1,27 @@
 #!/bin/bash
 # Build a MASTER structural-search database from the local RCSB PDB archive.
 # Input:  <rcsb>/{aa}/pdbXXXX.ent.gz   (gzipped PDB, divided layout)
-# Output: <out>/pdb/     decompressed plain-text PDB
-#         <out>/pds/     createPDS target PDS files (the actual database)
-#         <out>/pdb_list.txt     input list for createPDS (absolute paths)
-#         <out>/target_list.txt  --targetList for master (absolute paths)
+# Output: <out>/pdb/            decompressed plain-text PDB
+#         <out>/pds/            createPDS target PDS files (the actual database)
+#         <out>/pdb_list.txt    input list for createPDS (absolute paths)
+#         <out>/target_list.txt --targetList for master (absolute paths)
 #
 # createPDS only reads *uncompressed* PDB text, so gz files must be decompressed
 # first. Steps are idempotent: rerunning skips already-done work.
+#
+# A note on paths: --rcsb and --out are canonicalized to ABSOLUTE paths up front,
+# so every path derived from them (PDB_DIR / PDS_DIR / PDB_LIST / TARGET_LIST /
+# the *.pds outputs) and every path written INSIDE pdb_list.txt / target_list.txt
+# is absolute. This keeps everything valid regardless of cwd changes — build()
+# cds into PDS_DIR so createPDS drops .pds there, and because all paths are
+# absolute the cd is harmless.
 #
 # Usage:
 #   bash create_master_db.sh --rcsb <SRC> --out <OUT> \
 #                            [--no-cleanPDB] [--dCut X --dStep X --phiStep X --psiStep X] \
 #                            {decompress|build|verify|all}
 #
-# Required (no default): --rcsb, --out, --createpds
+# Required (no default): --rcsb, --out
 # Expert (default):       --dCut 25.0 --dStep 5.0 --phiStep 10.0 --psiStep 10.0
 # cleanPDB is ON by default; pass --no-cleanPDB to disable.
 #
@@ -59,6 +66,7 @@ Action:
 
 Notes:
   createPDS must be on PATH (MASTER install, e.g. /usr/local/bin).
+  All paths are canonicalized to absolute before use.
 EOF
 }
 
@@ -92,6 +100,13 @@ if ! command -v createPDS >/dev/null 2>&1; then
 fi
 CREATEPDS="$(command -v createPDS)"
 
+# ---------------- canonicalize to absolute paths ----------------
+# Both inputs become absolute, so every derived path — PDB_DIR, PDB_LIST,
+# TARGET_LIST, the *.pds outputs, and the lines written insde pdb_list.txt /
+# target_list.txt — is absolute. Relative --rcsb/--out work regardless of cwd.
+RCSB_DIR="$(cd "$RCSB_DIR" && pwd)"
+MASTERDIR="$(cd "$MASTERDIR" && pwd)"
+
 PDB_DIR="$MASTERDIR/pdb"
 PDS_DIR="$MASTERDIR/pds"
 PDB_LIST="$MASTERDIR/pdb_list.txt"
@@ -99,17 +114,6 @@ TARGET_LIST="$MASTERDIR/target_list.txt"
 LOG="$MASTERDIR/create_master_db.log"
 
 mkdir -p "$MASTERDIR" "$PDB_DIR" "$PDS_DIR"
-
-# Resolve MASTERDIR to absolute so relative --out canonicalizes here. All of
-# PDB_DIR/PDS_DIR/PDB_LIST/TARGET_LIST and the paths inside pdb_list.txt are
-# derived from MASTERDIR and thus become absolute too. This keeps them valid
-# after build() cds into PDS_DIR (makePDS runs there).
-MASTERDIR="$(cd "$MASTERDIR" && pwd)"
-PDB_DIR="$MASTERDIR/pdb"
-PDS_DIR="$MASTERDIR/pds"
-PDB_LIST="$MASTERDIR/pdb_list.txt"
-TARGET_LIST="$MASTERDIR/target_list.txt"
-LOG="$MASTERDIR/create_master_db.log"
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
@@ -134,6 +138,8 @@ decompress() {
     local n; n=$(find "$RCSB_DIR" -name '*.ent.gz' | wc -l)
     log "Processed $n gz entries (含已存在跳过)."
 
+    # PDB_DIR is absolute -> the lines written here are absolute, so createPDS
+    # can open them no matter where it runs.
     log "Writing $PDB_LIST"
     find "$PDB_DIR" -maxdepth 1 -type f | sort > "$PDB_LIST"
     log "  $(wc -l < "$PDB_LIST") uncompressed PDB files listed."
@@ -142,7 +148,7 @@ decompress() {
 # ---------------- action: build (convert to PDS) ----------------
 build() {
     if [ ! -s "$PDB_LIST" ]; then
-        log "ERROR: $PDB_LIST empty/missing. Run: $0 --rcsb ... --out ... --createpds ... decompress first." >&2
+        log "ERROR: $PDB_LIST empty/missing. Run: $0 --rcsb ... --out ... decompress first." >&2
         exit 1
     fi
     log "Converting PDB -> PDS (target) into $PDS_DIR/ (cleanPDB='${CLEAN_PDB:-off}')"
