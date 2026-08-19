@@ -11,7 +11,7 @@ def parse_args():
         "-i",
         "--input",
         required=True,
-        action="append",
+        nargs="+",
         metavar="INPUT",
         help="Path to the result text file",
     )
