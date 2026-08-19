@@ -2,6 +2,7 @@
 # Build a MASTER structural-search database from the local RCSB PDB archive.
 # Input:  <rcsb>/{aa}/pdbXXXX.ent.gz   (gzipped PDB, divided layout)
 # Output: <out>/pdb/            decompressed plain-text PDB
+#         <out>/pdb_filtered/   PDBs containing >=1 MASTER-supported residue
 #         <out>/pds/            createPDS target PDS files (the actual database)
 #         <out>/pdb_list.txt    input list for createPDS (absolute paths)
 #         <out>/target_list.txt --targetList for master (absolute paths)
@@ -19,7 +20,7 @@
 # Usage:
 #   bash create_master_db.sh --rcsb <SRC> --out <OUT> \
 #                            [--no-cleanPDB] [--dCut X --dStep X --phiStep X --psiStep X] \
-#                            {decompress|build|verify|all}
+#                            {decompress|filter|build|verify|all}
 #
 # Required (no default): --rcsb, --out
 # Expert (default):       --dCut 25.0 --dStep 5.0 --phiStep 10.0 --psiStep 10.0
@@ -32,6 +33,10 @@ set -euo pipefail
 # ---------------- expert params (defaults) ----------------
 DCUT=25.0; DSTEP=5.0; PHISTEP=10.0; PSISTEP=10.0   # must match between DB and query
 CLEAN_PDB="--cleanPDB"                              # ON by default; --no-cleanPDB clears it
+
+# Residue names createPDS accepts with --cleanPDB (CreateOptions::setLegalAA):
+# 20 natural + HIS protonation variants + MSE + modified CSO/HIP/PTR/SEC/SEP/TPO.
+MASTER_SUPPORTED="ALA ARG ASN ASP CYS GLN GLU GLY HIS HSC HSD HSE HSP ILE LEU LYS MET MSE PHE PRO SER THR TRP TYR VAL CSO HIP PTR SEC SEP TPO"
 
 # createPDS is resolved via PATH (a MASTER install provides it, e.g. /usr/local/bin).
 
@@ -60,9 +65,10 @@ Other:
 
 Action:
   decompress         gunzip .ent.gz -> out/pdb, write pdb_list.txt
+  filter             keep PDBs w/ any MASTER-supported residue -> out/pdb_filtered
   build              createPDS pdb_list.txt -> out/pds, write target_list.txt
   verify             compare PDS count vs target_list count
-  all                decompress + build + verify
+  all                decompress + filter + build + verify
 
 Notes:
   createPDS must be on PATH (MASTER install, e.g. /usr/local/bin).
@@ -80,7 +86,7 @@ while [ $# -gt 0 ]; do
         --dStep)       DSTEP="$2"; shift 2 ;;
         --phiStep)     PHISTEP="$2"; shift 2 ;;
         --psiStep)     PSISTEP="$2"; shift 2 ;;
-        decompress|build|verify|all) ACTION="$1"; shift ;;
+        decompress|filter|build|verify|all) ACTION="$1"; shift ;;
         -h|--help)     usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -108,12 +114,13 @@ RCSB_DIR="$(cd "$RCSB_DIR" && pwd)"
 MASTERDIR="$(cd "$MASTERDIR" && pwd)"
 
 PDB_DIR="$MASTERDIR/pdb"
+PDB_FILTERED="$MASTERDIR/pdb_filtered"
 PDS_DIR="$MASTERDIR/pds"
 PDB_LIST="$MASTERDIR/pdb_list.txt"
 TARGET_LIST="$MASTERDIR/target_list.txt"
 LOG="$MASTERDIR/create_master_db.log"
 
-mkdir -p "$MASTERDIR" "$PDB_DIR" "$PDS_DIR"
+mkdir -p "$MASTERDIR" "$PDB_DIR" "$PDB_FILTERED" "$PDS_DIR"
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
@@ -143,6 +150,35 @@ decompress() {
     log "Writing $PDB_LIST"
     find "$PDB_DIR" -maxdepth 1 -type f | sort > "$PDB_LIST"
     log "  $(wc -l < "$PDB_LIST") uncompressed PDB files listed."
+}
+
+# ---------------- action: filter (keep PDBs with >=1 MASTER-supported residue) ----------------
+filter() {
+    if [ ! -d "$PDB_DIR" ]; then
+        log "ERROR: $PDB_DIR missing. Run: $0 --rcsb ... --out ... decompress first." >&2
+        exit 1
+    fi
+    local NJOBS; NJOBS=${NJOBS:-$(nproc)}
+    # bash -c 会新开子 shell,不继承普通 shell 变量,须 export 才能读到路径与残基表
+    export PDB_FILTERED MASTER_SUPPORTED
+    log "Filtering $PDB_DIR -> $PDB_FILTERED (keep PDBs containing any MASTER-supported residue)"
+    mkdir -p "$PDB_FILTERED"
+
+    find "$PDB_DIR" -maxdepth 1 -type f -print0 | \
+    xargs -0 -P "$NJOBS" -n1 bash -c '
+        f="$1"
+        id=$(basename "$f")
+        [ -f "$PDB_FILTERED/$id" ] && exit 0          # 已拷过 → 跳过(幂等)
+        # 保留 iff 任一 ATOM/HETATM 残基名(第18-20列)落在 MASTER 支持表内
+        awk '\''
+            BEGIN { n=split(ENVIRON["MASTER_SUPPORTED"],a," "); for(i=1;i<=n;i++) allowed[a[i]]=1 }
+            /^(ATOM  |HETATM)/ { if (substr($0,18,3) in allowed) { f=1; exit } }
+            END { exit (f ? 0 : 1) }
+        '\'' "$f" && cp "$f" "$PDB_FILTERED/$id"
+    ' _
+
+    local n; n=$(find "$PDB_FILTERED" -maxdepth 1 -type f | wc -l)
+    log "  $n PDBs kept in $PDB_FILTERED."
 }
 
 # ---------------- action: build (convert to PDS) ----------------
@@ -178,8 +214,9 @@ verify() {
 # ---------------- dispatch ----------------
 case "$ACTION" in
     decompress) decompress ;;
+    filter)     filter ;;
     build)      build ;;
     verify)     verify ;;
-    all)        decompress; build; verify ;;
+    all)        decompress; filter; build; verify ;;
     *)          usage; exit 1 ;;   # unreachable (validated above)
 esac
