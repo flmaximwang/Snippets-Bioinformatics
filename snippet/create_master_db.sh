@@ -10,7 +10,7 @@
 # first. Steps are idempotent: rerunning skips already-done work.
 #
 # Usage:
-#   bash create_master_db.sh --rcsb <SRC> --out <OUT> --createpds <BIN> \
+#   bash create_master_db.sh --rcsb <SRC> --out <OUT> \
 #                            [--no-cleanPDB] [--dCut X --dStep X --phiStep X --psiStep X] \
 #                            {decompress|build|verify|all}
 #
@@ -100,31 +100,40 @@ LOG="$MASTERDIR/create_master_db.log"
 
 mkdir -p "$MASTERDIR" "$PDB_DIR" "$PDS_DIR"
 
+# Resolve MASTERDIR to absolute so relative --out canonicalizes here. All of
+# PDB_DIR/PDS_DIR/PDB_LIST/TARGET_LIST and the paths inside pdb_list.txt are
+# derived from MASTERDIR and thus become absolute too. This keeps them valid
+# after build() cds into PDS_DIR (makePDS runs there).
+MASTERDIR="$(cd "$MASTERDIR" && pwd)"
+PDB_DIR="$MASTERDIR/pdb"
+PDS_DIR="$MASTERDIR/pds"
+PDB_LIST="$MASTERDIR/pdb_list.txt"
+TARGET_LIST="$MASTERDIR/target_list.txt"
+LOG="$MASTERDIR/create_master_db.log"
+
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
 # ---------------- action: decompress ----------------
 decompress() {
     local NJOBS; NJOBS=${NJOBS:-$(nproc)}     # 这台 nproc=32,SSD 可直接跑满
-    log "Decompressing $RCSB_DIR/*/*.ent.gz -> $PDB_DIR/  ($NJOBS 并行)"
+    # bash -c 会新开子 shell,不继承普通 shell 变量,须 export 才能读到路径
+    export PDB_DIR RCSB_DIR
+    log "Decompressing $RCSB_DIR/*/*.ent.gz -> $PDB_DIR/  ($NJOBS 并行,流式)"
     mkdir -p "$PDB_DIR"
 
-    # 已存在则跳过:只在入口过滤,worker 最简
-    (
-        for f in "$RCSB_DIR"/*/*.ent.gz; do
-            [ -e "$f" ] || continue # glob 无法匹配到文件时避免报错
-            local id; id=$(basename "$f" .ent.gz)
-            [ -f "$PDB_DIR/$id" ] && continue      # 目标已存在 → 跳过
-            printf '%s\n' "$f"
-        done
-    ) | xargs -P "$NJOBS" -d '\n' -I{} bash -c '
+    # find 流式输出:边遍历边喂给 xargs,不等 glob 全部展开
+    # 已存在则跳过:worker 内用 [ -f ] 判断,避免重复解压
+    find "$RCSB_DIR" -name '*.ent.gz' -print0 | \
+    xargs -0 -P "$NJOBS" -n1 bash -c '
         f="$1"
-        gunzip -c "$f" > "$OUT/$(basename "$f" .ent.gz)"
-    ' _ {}
+        id=$(basename "$f" .ent.gz)
+        [ -f "$PDB_DIR/$id" ] && exit 0          # 目标已存在 → 跳过
+        gunzip -c "$f" > "$PDB_DIR/$id"
+    ' _
 
     local n; n=$(find "$RCSB_DIR" -name '*.ent.gz' | wc -l)
     log "Processed $n gz entries (含已存在跳过)."
 
-    wait
     log "Writing $PDB_LIST"
     find "$PDB_DIR" -maxdepth 1 -type f | sort > "$PDB_LIST"
     log "  $(wc -l < "$PDB_LIST") uncompressed PDB files listed."
