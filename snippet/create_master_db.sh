@@ -111,7 +111,7 @@ decompress() {
     # 已存在则跳过:只在入口过滤,worker 最简
     (
         for f in "$RCSB_DIR"/*/*.ent.gz; do
-            [ -e "$f" ] || continue
+            [ -e "$f" ] || continue # glob 无法匹配到文件时避免报错
             local id; id=$(basename "$f" .ent.gz)
             [ -f "$PDB_DIR/$id" ] && continue      # 目标已存在 → 跳过
             printf '%s\n' "$f"
