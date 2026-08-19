@@ -1,7 +1,8 @@
 import argparse
 from pathlib import Path
 
-HEADER = "tid	idf	total_match_count	node_count	edge_count	max_node_cov	min_rmsd	nres	plddt	matching_residues	db_key	query_residues"
+BRIEF_HEADER = "tid	node_count	idf	rmsd	matching_residues	query_residues"
+PER_STRUCTURE_HEADER = "tid	idf	total_match_count	node_count	edge_count	max_node_cov	min_rmsd	nres	plddt	matching_residues	db_key	query_residues"
 
 
 def parse_args():
@@ -14,6 +15,11 @@ def parse_args():
         nargs="+",
         metavar="INPUT",
         help="Path to the result text file",
+    )
+    p.add_argument(
+        "--per-structure",
+        action="store_true",
+        help="Process output with --per-structure option"
     )
 
     return p.parse_args()
@@ -30,11 +36,15 @@ def main():
         if paths[-1].suffix == ".tsv":
             raise FileExistsError("Do not name result files with .tsv suffix")
 
+    
     for path in paths:
         with open(path) as f:
             content = f.read()
         with open(path.with_suffix(".tsv"), "w") as f:
-            f.write(HEADER + "\n" + content)
+            if args.per_structure:
+                f.write(PER_STRUCTURE_HEADER + "\n" + content)
+            else:
+                f.write(BRIEF_HEADER + "\n" + content)
 
 if __name__ == "__main__":
     main()
