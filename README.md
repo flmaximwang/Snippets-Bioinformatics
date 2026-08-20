@@ -120,6 +120,9 @@ Query PDB → PDS must be done beforehand:
 --phiStep 10.0 --psiStep 10.0` (dCut/dStep/phiStep/psiStep must match the DB
 build). Note `--topN`/`--minN` apply per piece, not globally.
 
+Full per-parameter reference (every flag with input + effect examples):
+`docs/master/master_search.md`.
+
 ## Dependencies
 
 Get `biorazer` from Github.
