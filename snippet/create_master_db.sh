@@ -313,6 +313,43 @@ filter() {
     log "  $n PDB model files kept in $PDB_FILTERED."
 }
 
+# build_list_index <idx> <pdblist_out> <pdslist_out>: for ONE index {aa}, append
+# the .pdb/.pds pairs that still lack a .pds to the two given list files. Shared
+# by the serial and parallel gen_build_list paths. mkdir -p is idempotent, so
+# parallel workers touching the same pds/{idx} parent dir concurrently are safe.
+build_list_index() {
+    local idx="$1" o1="$2" o2="$3" idir npdb npds f rel pout
+    idir="$PDB_FILTERED/$idx"
+    [ -d "$idir" ] || return 0
+    # counts are RECURSIVE: single models sit flat in {aa}, multi-model splits
+    # live in {aa}/<id>/ subdirs. Counting all depths keeps the fast path
+    # consistent with the mirror-image pds/ layout.
+    npdb=$(find "$idir" -type f -name '*.pdb' | wc -l)
+    # pds/{idx} 可能还不存在: find 会因 No such file 返回非零,
+    # 在 set -euo pipefail 下会让 $( ) 赋值失败; 追加 || true,
+    # 让"目录不存在"计为 0,而非致命错误。
+    npds=$(find "$PDS_DIR/$idx" -type f -name '*.pds' 2>/dev/null | wc -l || true)
+
+    # 空索引 → 无需建库
+    [ "$npdb" -eq 0 ] && return 0
+    # 快速路径: .pdb 与 .pds 个数一致 → 判定该索引完整并跳过。
+    # 哨兵 .done 既非 .pdb 也非 .pds,不参与任一计数,故不影响快路径;
+    # 安全前提是管线纯增量(不删文件),否则由下方逐文件下钻兜底。
+    [ "$npdb" -eq "$npds" ] && return 0
+
+    # 否则下钻逐个比较(递归):为每个尚缺 .pds 的 .pdb 写一对绝对路径。
+    # .pds 位置镜像 .pdb 的相对路径:pdb_filtered/{aa}/... -> pds/{aa}/...
+    find "$idir" -type f -name '*.pdb' | while read -r f; do
+        rel="${f#$PDB_FILTERED/}"                     # {aa}/.../pdbXXXX.pdb (结构可含子目录)
+        pout="$PDS_DIR/${rel%.pdb}.pds"
+        if [ ! -e "$pout" ]; then
+            mkdir -p "$(dirname "$pout")"
+            printf '%s\n' "$f"     >> "$o1"
+            printf '%s\n' "$pout"  >> "$o2"
+        fi
+    done
+}
+
 # ---------------- action: gen_build_list (incremental; run BEFORE build) ----------------
 # Incremental skip is decided PER INDEX {aa}:
 #   - index dir empty                        -> nothing to build (complete)
@@ -320,49 +357,71 @@ filter() {
 #   - otherwise descend: compare each .pdb individually against its .pds
 # Writes pdb_filtered_list.txt (missing .pdb inputs) and build_pds_list.txt
 # (their .pds outputs). Lines are absolute paths.
+#
+# --njobs: the sorted index list is split into NJOBS contiguous chunks, each
+# handled by a background subshell that writes its OWN pair of partial lists
+# (via build_list_index), then the partials are merged in job order into the
+# two final lists. Subshells are `( ... ) &` forks (not bash -c re-execs), so
+# build_list_index is inherited with no export needed. Default 8 to match
+# decompress/filter/build.
 gen_build_list() {
     if [ ! -d "$PDB_FILTERED" ]; then
         log "ERROR: $PDB_FILTERED missing. Run: $0 ... filter first." >&2
         exit 1
     fi
     mkdir -p "$PDS_DIR"
+    local NJOBS="${NJOBS:-8}"
+    [[ "$NJOBS" =~ ^[1-9][0-9]*$ ]] || { log "invalid NJOBS: $NJOBS" >&2; exit 1; }
+    local LISTDIR="$MASTERDIR/.gen_build_list_chunks"
+    local IDXFILE="$LISTDIR/indices.txt"
+    local total per i start end npid=0 failed=0 p idx
+    rm -rf "$LISTDIR"; mkdir -p "$LISTDIR"
+    find "$PDB_FILTERED" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort > "$IDXFILE"
+    total=$(wc -l < "$IDXFILE")
+
+    log "Writing incremental build lists (per-index, PDBs missing a .pds) to $PDS_DIR ($NJOBS 并行)"
     : > "$PDB_FILTERED_LIST"
     : > "$BUILD_PDS_LIST"
-    log "Writing incremental build lists (per-index, PDBs missing a .pds) to $PDS_DIR"
+    [ "$total" -eq 0 ] && { log "  No index dirs under $PDB_FILTERED."; rm -rf "$LISTDIR"; return 0; }
 
-    find "$PDB_FILTERED" -mindepth 1 -maxdepth 1 -type d | sort | while read -r idir; do
-        idx="$(basename "$idir")"
-        # counts are RECURSIVE now: single models sit flat in {aa}, multi-model
-        # splits live in {aa}/<id>/ subdirs. Counting all depths keeps the fast
-        # path consistent with the mirror-image pds/ layout.
-        npdb=$(find "$idir" -type f -name '*.pdb' | wc -l)
-        # pds/{idx} 可能还不存在: find 会因 No such file 返回非零,
-        # 在 set -euo pipefail 下会让 $( ) 赋值失败并中断整个 while 管道,
-        # 故追加 || true,让"目录不存在"计为 0,而非致命错误。
-        npds=$(find "$PDS_DIR/$idx" -type f -name '*.pds' 2>/dev/null | wc -l || true)
-
-        # 空索引 → 无需建库
-        [ "$npdb" -eq 0 ] && continue
-        # 快速路径: .pdb 与 .pds 个数一致 → 判定该索引完整并跳过。
-        # 哨兵 .done 既非 .pdb 也非 .pds,不参与任一计数,故不影响快路径;
-        # 安全前提是管线纯增量(不删文件),否则由下方逐文件下钻兜底。
-        if [ "$npdb" -eq "$npds" ]; then
-            continue
-        fi
-
-        # 否则下钻逐个比较(递归):为每个尚缺 .pds 的 .pdb 写一对绝对路径。
-        # .pds 位置镜像 .pdb 的相对路径:pdb_filtered/{aa}/... -> pds/{aa}/...
-        find "$idir" -type f -name '*.pdb' | while read -r f; do
-            rel="${f#$PDB_FILTERED/}"                     # {aa}/.../pdbXXXX.pdb (结构可含子目录)
-            pout="$PDS_DIR/${rel%.pdb}.pds"
-            if [ ! -e "$pout" ]; then
-                mkdir -p "$(dirname "$pout")"
-                printf '%s\n' "$f"     >> "$PDB_FILTERED_LIST"
-                printf '%s\n' "$pout"  >> "$BUILD_PDS_LIST"
-            fi
+    if [ "$NJOBS" -eq 1 ]; then
+        # serial: write straight into the final lists
+        while read -r idx; do
+            build_list_index "$idx" "$PDB_FILTERED_LIST" "$BUILD_PDS_LIST"
+        done < "$IDXFILE"
+    else
+        # parallel: each chunk writes its own partial pair, merged afterwards
+        per=$(( (total + NJOBS - 1) / NJOBS ))
+        for i in $(seq 1 "$NJOBS"); do
+            start=$(( (i-1)*per + 1 ))
+            [ "$start" -gt "$total" ] && break
+            end=$(( start + per - 1 )); [ "$end" -gt "$total" ] && end=$total
+            sed -n "${start},${end}p" "$IDXFILE" > "$LISTDIR/idx.$i"
+            (
+                : > "$LISTDIR/pdblist.$i"
+                : > "$LISTDIR/pdslist.$i"
+                while read -r idx; do
+                    build_list_index "$idx" "$LISTDIR/pdblist.$i" "$LISTDIR/pdslist.$i"
+                done < "$LISTDIR/idx.$i"
+            ) &
+            eval "gen_pid_$i=\$!"
+            npid=$i
         done
-    done
-
+        # collect exit codes; merge whatever each worker produced
+        failed=0
+        for i in $(seq 1 "$npid"); do
+            eval "p=\$gen_pid_$i"
+            wait "$p" || failed=$((failed+1))
+        done
+        for i in $(seq 1 "$npid"); do
+            cat "$LISTDIR/pdblist.$i" >> "$PDB_FILTERED_LIST"
+            cat "$LISTDIR/pdslist.$i" >> "$BUILD_PDS_LIST"
+        done
+        if [ "$failed" -gt 0 ]; then
+            log "WARNING: $failed/$npid gen_build_list workers failed; lists may be incomplete."
+        fi
+    fi
+    rm -rf "$LISTDIR"
     log "  $(wc -l < "$PDB_FILTERED_LIST") PDB inputs pending, $(wc -l < "$BUILD_PDS_LIST") PDS outputs pending."
 }
 
