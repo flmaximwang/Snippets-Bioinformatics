@@ -366,21 +366,72 @@ gen_target_list() {
     log "  $(wc -l < "$TARGET_LIST") PDS entries."
 }
 
-# ---------------- action: build (convert to PDS) ----------------
+# ---------------- action: build (convert to PDS, parallel) ----------------
+# Runs NJOBS createPDS processes in parallel, one per contiguous line-range of the
+# two build lists. Splitting by the SAME line boundaries keeps each pdb/pds pair
+# intact and the output .pds paths (from --pdsList) are mutually disjoint, so no
+# two workers ever write the same file. createPDS is single-core per process and
+# writes no shared temp files (verified in source), so this is a near-linear CPU
+# speedup. It also isolates failures: a bad PDB makes its createPDS abort (exit 255)
+# but only that chunk is lost; the rest finish. Rerun gen_build_list + build to pick
+# up just the missing .pds.
 build() {
     if [ ! -s "$PDB_FILTERED_LIST" ] || [ ! -s "$BUILD_PDS_LIST" ]; then
         log "ERROR: $PDB_FILTERED_LIST or $BUILD_PDS_LIST missing/empty. Run: $0 ... gen_build_list first." >&2
         exit 1
     fi
-    log "Converting PDB -> PDS (target) into $PDS_DIR/{aa}/ (cleanPDB='${CLEAN_PDB:-off}')"
-    # Output .pds paths come from --pdsList (build_pds_list.txt), so createPDS writes
-    # them into $PDS_DIR/{aa} regardless of cwd. Parent dirs were created by gen_build_list.
-    ( cd "$PDS_DIR" && \
-      "$CREATEPDS" --type target \
-                   --pdbList "$PDB_FILTERED_LIST" --pdsList "$BUILD_PDS_LIST" \
-                   --dCut "$DCUT" --dStep "$DSTEP" \
-                   --phiStep "$PHISTEP" --psiStep "$PSISTEP" \
-                   $CLEAN_PDB )
+    # assign INSIDE the local declaration: a preceding bare `local NJOBS` would shadow
+    # (zero) the env value first, so `${NJOBS:-...}` on the next line always hits nproc.
+    local NJOBS="${NJOBS:-$(nproc)}"
+    local total per i start end CHUNKDIR npid failed
+    total=$(wc -l < "$PDB_FILTERED_LIST")
+    [ "$total" -eq 0 ] && { log "  Nothing to build (empty build lists)."; return 0; }
+    per=$(( (total + NJOBS - 1) / NJOBS ))
+    [ "$per" -lt 1 ] && per=1
+    CHUNKDIR="$MASTERDIR/.build_chunks"
+    rm -rf "$CHUNKDIR"; mkdir -p "$CHUNKDIR"
+    log "Converting PDB -> PDS (target) into $PDS_DIR/{aa}/  ($NJOBS 并行 createPDS, $total entries, $per/chunk; cleanPDB='${CLEAN_PDB:-off}')"
+
+    # 按同一行边界等分两个 list -> 每份 pdb/pds 配对完整。子 shell cd 到 PDS_DIR
+    # (createPDS 按 --pdsList 的绝对路径写 .pds, cwd 无关)。各 worker 输出重定向到
+    # 自己的日志, 便于失败后定位坏文件。
+    npid=0
+    for i in $(seq 1 "$NJOBS"); do
+        start=$(( (i-1)*per + 1 ))
+        [ "$start" -gt "$total" ] && break
+        end=$(( start + per - 1 )); [ "$end" -gt "$total" ] && end=$total
+        sed -n "${start},${end}p" "$PDB_FILTERED_LIST" > "$CHUNKDIR/pdblist.$i"
+        sed -n "${start},${end}p" "$BUILD_PDS_LIST"     > "$CHUNKDIR/pdslist.$i"
+        (
+            cd "$PDS_DIR" && \
+            "$CREATEPDS" --type target \
+                         --pdbList "$CHUNKDIR/pdblist.$i" --pdsList "$CHUNKDIR/pdslist.$i" \
+                         --dCut "$DCUT" --dStep "$DSTEP" \
+                         --phiStep "$PHISTEP" --psiStep "$PSISTEP" \
+                         $CLEAN_PDB
+        ) > "$CHUNKDIR/build.$i.log" 2>&1 &
+        # 记住 PID, 下面逐个 wait 收集状态
+        eval "pid_$i=\$!"
+        npid=$i
+    done
+
+    # 收集每个 worker 退出码 (坏文件 -> createPDS exit 255, 仅该分片失败)
+    failed=0
+    for i in $(seq 1 "$npid"); do
+        eval "p=\$pid_$i"
+        if ! wait "$p"; then
+            failed=$((failed+1))
+            log "  chunk $i FAILED (createPDS aborted; bad PDB). Log tail:"
+            tail -n 20 "$CHUNKDIR/build.$i.log" | sed 's/^/    /'
+        fi
+    done
+    rm -rf "$CHUNKDIR"
+
+    if [ "$failed" -gt 0 ]; then
+        log "WARNING: $failed/$npid chunks failed. Re-run gen_build_list then build to build only the still-missing .pds."
+    else
+        log "  All $npid build chunks succeeded."
+    fi
 }
 
 # ---------------- action: verify counts ----------------
