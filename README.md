@@ -87,6 +87,39 @@ Outputs: `prepared_inputs/<stem>.prepared.pdb` + `<stem>.fold_tree.txt`,
 per-decoy dirs with PDB + scorefile + `rosetta.log`/`rosetta.err`,
 `run_config.json`, `run_summary.json`.
 
+## MASTER structural-motif search — query side (snippet/master_search.sh)
+
+Runs the `master` search binary against a built PDS database (query side only;
+does NOT build the DB — that's `snippet/create_master_db.sh` — and does NOT do
+PDB→PDS, that's `createPDS`). Given a query `.pds` and a `--targetList`, it
+searches the database with piece-wise splitting + resume.
+
+Parallelism & resume both come from **splitting `--targetList`**:
+
+- `--target-num-per-list` (default 10000) divides the list into consecutive
+  pieces of ≤ that many structures each; each piece is one `master --targetList
+  <piece>` job.
+- A `.done.<i>` sentinel in `out/.chunks/` is written only after a piece finishes,
+  so re-running the same command skips every already-done piece (resume) and only
+  searches the rest, then re-merges.
+- `--njobs` is ONLY a concurrency cap (how many pieces run at once to use the
+  cores), NOT the split size.
+- A fingerprint of (targetList content + `--target-num-per-list`) invalidates all
+  sentinels if either changes, so stale "done" can never skip needed work.
+
+Per-piece match/seq go under `out/.chunks/`; match structures go into the shared
+`--structOut` dir (pieces are disjoint target sets, so filenames never collide).
+Final merged outputs: `out/match.txt`, optional `out/seqs.txt`, `out/structs/`.
+
+    bash snippet/master_search.sh \
+      --query query/1akha.pds --targetList target_list.txt --rmsdCut 3.0 \
+      --out out --njobs 8 --target-num-per-list 10000 [--bbRMSD] [--topN N]
+
+Query PDB → PDS must be done beforehand:
+`createPDS --type query --pdb in.pdb --pds in.pds --dCut 25.0 --dStep 5.0
+--phiStep 10.0 --psiStep 10.0` (dCut/dStep/phiStep/psiStep must match the DB
+build). Note `--topN`/`--minN` apply per piece, not globally.
+
 ## Dependencies
 
 Get `biorazer` from Github.
