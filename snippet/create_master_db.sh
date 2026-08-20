@@ -76,6 +76,7 @@ Expert (defaults):
 
 Other:
   --no-cleanPDB      disable --cleanPDB (default: ON)
+  --njobs <N>        parallel jobs for decompress/filter/build (default: 8)
 
 Action:
   decompress         gunzip .ent.gz -> out/pdb/{aa}/*.pdb
@@ -103,6 +104,7 @@ while [ $# -gt 0 ]; do
         --dStep)       DSTEP="$2"; shift 2 ;;
         --phiStep)     PHISTEP="$2"; shift 2 ;;
         --psiStep)     PSISTEP="$2"; shift 2 ;;
+        --njobs)       NJOBS="$2"; shift 2 ;;
         decompress|filter|gen_build_list|build|gen_target_list|verify|all) ACTION="$1"; shift ;;
         -h|--help)     usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -115,6 +117,12 @@ err=0
 [ -n "$MASTERDIR" ]  || { echo "missing required: --out" >&2; err=1; }
 [ -n "$ACTION" ]     || { echo "missing action: decompress|build|verify|all" >&2; err=1; }
 if [ "$err" -ne 0 ]; then usage; exit 1; fi
+
+# validate --njobs (if provided): must be a positive integer
+if [ -n "${NJOBS:-}" ] && ! [[ "$NJOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "invalid --njobs value: '$NJOBS' (must be a positive integer)" >&2
+    exit 1
+fi
 
 # verify createPDS is reachable via PATH
 if ! command -v createPDS >/dev/null 2>&1; then
@@ -145,7 +153,7 @@ idx_of() { local b="$1"; b="${b%.*}"; b="${b#pdb}"; echo "${b:1:2}"; }
 
 # ---------------- action: decompress ----------------
 decompress() {
-    local NJOBS; NJOBS=${NJOBS:-$(nproc)}
+    local NJOBS="${NJOBS:-8}"   # default 8 to avoid pegging all cores & getting OOM-killed; --njobs overrides
     # bash -c 会新开子 shell,不继承普通 shell 变量,须 export 才能读到路径
     export PDB_DIR RCSB_DIR
     log "Decompressing $RCSB_DIR/*/*.ent.gz -> $PDB_DIR/{aa}/  ($NJOBS 并行,流式)"
@@ -271,7 +279,7 @@ filter() {
         log "ERROR: $PDB_DIR missing. Run: $0 --rcsb ... --out ... decompress first." >&2
         exit 1
     fi
-    local NJOBS; NJOBS=${NJOBS:-$(nproc)}
+    local NJOBS="${NJOBS:-8}"   # default 8 to avoid pegging all cores & getting OOM-killed; --njobs overrides
     export PDB_FILTERED MASTER_SUPPORTED
     log "Filtering $PDB_DIR/{aa} -> $PDB_FILTERED/{aa} (single keep / multi split; keep >=1 full MASTER residue: CA, C, N, O)"
     mkdir -p "$PDB_FILTERED"
@@ -382,7 +390,7 @@ build() {
     fi
     # assign INSIDE the local declaration: a preceding bare `local NJOBS` would shadow
     # (zero) the env value first, so `${NJOBS:-...}` on the next line always hits nproc.
-    local NJOBS="${NJOBS:-$(nproc)}"
+    local NJOBS="${NJOBS:-8}"   # default 8 to avoid pegging all cores & getting OOM-killed; --njobs overrides
     local total per i start end CHUNKDIR npid failed
     total=$(wc -l < "$PDB_FILTERED_LIST")
     [ "$total" -eq 0 ] && { log "  Nothing to build (empty build lists)."; return 0; }
