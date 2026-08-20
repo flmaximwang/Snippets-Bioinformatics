@@ -32,6 +32,11 @@ mkdir -p "$DST/examples"
 cp -f "$TMP/$SRC_DOCS" "$DST/infer_json_format.md"
 cp -rf "$TMP/$SRC_EXAMPLES/." "$DST/examples/"
 
+# 截断所有 *.a3m 到前 100 行, 避免仓库过大
+find "$DST/examples" -type f -name '*.a3m' -print0 | while IFS= read -r -d '' f; do
+  head -n 100 "$f" > "$f.head" && mv "$f.head" "$f"
+done
+
 SHA="$(git -C "$TMP" rev-parse HEAD)"
 printf '%s %s\n' "$REF" "$SHA" > "$STATE"
 
