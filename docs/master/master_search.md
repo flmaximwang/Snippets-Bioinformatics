@@ -54,8 +54,8 @@ renumbered by GLOBAL rank into the flat `structs/match<n>.pdb`, so
 python3 master_search.py \
   --query <q.pds> --targetList <list> --rmsdCut <X> --out <dir> \
   [--chunk-size N] [--njobs N] \
-  [--bbRMSD] [--topN N] [--minN N] [--gapLen S] [--outType T] \
-  [--seqOut FILE] [--no-structs] [--structOut DIR] [--matchOut FILE] \
+  [--bbRMSD] [--topN N] [--merged-topN N] [--minN N] [--gapLen S] [--outType T] \
+  [--no-breakage] [--seqOut FILE] [--no-structs] [--structOut DIR] [--matchOut FILE] \
   [--master PATH] [--force]
 ```
 
@@ -202,23 +202,51 @@ Flag. Switch the metric from the default CA-only RMSD to full-backbone RMSD
 
 ### `--topN <N>`
 
-Keep only the best N matches (by the search metric). It is **global**: applied
-per piece (so a piece never carries more than N candidates, keeping per-piece
-files small) **and** re-applied after the merge, where all pieces' matches are
-sorted by RMSD ascending and truncated to the overall best N.
+Per-piece candidate cap. Forwarded to each `master` piece so a piece never
+carries more than N candidates (keeping per-piece files small and speeding
+search).
 
 - **Input:** a non-negative integer (default `100`; `0` = no limit).
-- **Effect:** forwarded as `master --topN` (also speeds search: it lets `master`
-  lower the effective threshold once N matches are found), then re-applied
-  globally at merge time. The merged `match.txt` is RMSD-sorted.
-- **Why both are safe (exactness):** a global top-N match is always inside some
-  piece's per-piece top-N — a piece that discards a match `m` has N matches with
-  RMSD ≤ `m`, so `m` can never rank in the global top-N. Per-piece trimming only
-  shrinks the candidate set, never drops a global-top candidate.
+- **Effect:** passed as `master --topN`. The final merged count is governed by
+  `--merged-topN`, NOT by `--topN`.
+- **Why a per-piece cap never loses a global candidate:** a global top-N match is
+  always inside some piece's per-piece top-N — a piece that discards a match `m`
+  has N matches with RMSD ≤ `m`, so `m` can never rank in the global top-N. Keep
+  `--topN ≥ --merged-topN` (or set `--topN 0`) for an exact global `--merged-topN`.
 
 ```sh
---rmsdCut 3.0 --topN 5000     # overall best 5000 across the whole database
+--topN 100 --merged-topN 100   # each piece keeps <=100, final merged keeps 100
 ```
+
+### `--merged-topN <N>`
+
+Final number of matches kept after the merge (and after `--no-breakage`), sorted
+by RMSD ascending.
+
+- **Input:** a non-negative integer. Default: **same as `--topN`**.
+- **Effect:** all done pieces' matches are merged, sorted by RMSD, optionally
+  filtered by `--no-breakage`, then truncated to the overall best `--merged-topN`.
+  The merged `match.txt`, `seqs.txt` and flat `structs/match<n>.pdb` all reflect
+  this final count.
+
+### `--no-breakage`
+
+Drop matches whose adjacent query segments are not really peptide-bonded — i.e.
+there is a **real gap** between them. Requires the per-piece match structures (do
+not combine with `--no-structs`).
+
+- **Method:** for each adjacent pair of segments, measure the distance between the
+  `C` of seg_i's last matched residue and the `N` of seg_{i+1}'s first matched
+  residue (read from the per-piece struct file). If that C–N distance is
+  `≥ 1.4 Å` the two segments are not directly bonded → the match is dropped. A
+  real peptide bond is ~1.33 Å.
+- **Effect:** removes cross-chain matches (segments on different chains) and any
+  match where a real loop residue sits between the segments. It keeps only
+  matches whose two segments are **directly covalently bonded** (contiguous).
+- ⚠️ **Consequence for loop searches:** if a genuine loop residue exists *between*
+  the two segments, that boundary C–N is not a direct bond (it spans the loop),
+  so such matches are dropped too. `--no-breakage` keeps only directly-bonded
+  (gap-0-equivalent) structures — combine it with `--gapLen 0` for that intent.
 
 ### `--minN <N>`
 
@@ -412,7 +440,9 @@ the union of all `.done` pieces.
 | `--chunk-size` | `10000` | int | structures per piece = resume granularity |
 | `--njobs` | `8` | int | max concurrent pieces (cap only) |
 | `--bbRMSD` | off | flag | full-backbone RMSD metric |
-| `--topN` | `100` | int | keep best N matches globally (0 = no limit) |
+| `--topN` | `100` | int | per-piece candidate cap (0 = no limit) |
+| `--merged-topN` | `=--topN` | int | final merged count after merge + --no-breakage |
+| `--no-breakage` | off | flag | drop matches with a real gap (boundary C–N ≥ 1.4 Å) |
 | `--minN` | `0` | int | return ≥N best matches (per piece) |
 | `--gapLen` | — | str | gap-length restraints, `'min-max;...'` |
 | `--outType` | `match` | str | `match`\|`full`\|`wgap` region for structs/seqs |

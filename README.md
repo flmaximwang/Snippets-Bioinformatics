@@ -122,8 +122,10 @@ ranked n-th match structure (match1.pdb = overall best).
 Query PDB → PDS must be done beforehand:
 `createPDS --type query --pdb in.pdb --pds in.pds --dCut 25.0 --dStep 5.0
 --phiStep 10.0 --psiStep 10.0` (dCut/dStep/phiStep/psiStep must match the DB
-build). `--topN` is a GLOBAL top-N (per-piece trim + re-rank by RMSD after the
-merge); `--minN` applies per piece. The merged `match.txt` is RMSD-sorted.
+build). `--topN` caps each piece; `--merged-topN` sets the final merged count
+(default: `--topN`); `--no-breakage` drops matches whose adjacent segments are
+not really peptide-bonded (boundary C-to-N distance < 1.4 Å, measured from the
+match structures). The merged `match.txt` is RMSD-sorted.
 
 Full per-parameter reference (every flag with input + effect examples):
 `docs/master/master_search.md`.

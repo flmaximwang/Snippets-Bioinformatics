@@ -63,7 +63,10 @@ Options / passthrough to `master`:
   --chunk-size <N>          structures per piece (default 10000); sets the resume granularity
   --njobs <N>               how many pieces to search concurrently (default 8)
   --bbRMSD                  full-backbone RMSD instead of CA-only
-  --topN <N>                keep best N matches (global top-N after merge, see Notes)
+  --topN <N>                keep best N matches per piece (forwarded to master; 0 = no limit)
+  --merged-topN <N>         final top-N kept after merge + --no-breakage (default: same as --topN)
+  --no-breakage             drop matches whose adjacent segments are not really
+                            peptide-bonded (C-to-N distance of boundary residues >= 1.4 A)
   --minN <N>                return at least N best matches (per piece)
   --gapLen <s>              gap restraints, e.g. '1-10;0-3'
   --outType <t>             match|full|wgap (region written by structOut)
@@ -75,22 +78,33 @@ Options / passthrough to `master`:
   --force                   reprocess all pieces even if done
 
 Notes:
-  --topN is a GLOBAL top-N: it is forwarded to each piece (so a piece never
-  carries more than N candidates, keeping per-piece files small) and then
-  re-applied after the merge, where all pieces' matches are sorted by RMSD
-  ascending and truncated to the overall best N. This is exact — a global top-N
-  match is always inside some piece's per-piece top-N (a piece that discards a
-  match m has N matches with RMSD <= m, so m can never rank in the global top-N).
-  --minN stays per piece (it widens the cutoff so a piece returns at least N
-  matches). The merged match.txt (and seqs.txt, aligned to it) is RMSD-sorted.
-  Adding an output flag (e.g. --seqOut) after pieces already ran does NOT
-  invalidate sentinels -> done pieces emit nothing for it; use --force to rebuild.
+  --topN is a PER-PIECE cap: it is forwarded to each master piece so a piece
+  never carries more than N candidates (keeping per-piece files small). The final
+  output keeps --merged-topN matches (default: --topN) after the merge, where all
+  pieces' matches are sorted by RMSD ascending, optionally filtered by
+  --no-breakage, then truncated. Per-piece topN never loses a global-top candidate:
+  a piece that discards a match m has N matches with RMSD <= m, so m cannot rank
+  in the global top-N (so keep --topN >= --merged-topN, or set --topN 0).
+  --minN stays per piece (it widens the cutoff so a piece returns at least N).
+  The merged match.txt (and seqs.txt, aligned to it) is RMSD-sorted.
+
+  --no-breakage requires the per-piece match structures (i.e. not --no-structs).
+  It measures, for each adjacent pair of query segments, the distance between the
+  C of seg_i's last matched residue and the N of seg_{i+1}'s first matched residue
+  in the target structure, and drops any match where that distance is >= 1.4 A
+  (i.e. the two segments are NOT directly peptide-bonded — a real gap). NOTE this
+  keeps only DIRECTLY-bonded (contiguous) matches: if a loop residue sits between
+  the two segments, that boundary C-N is not a direct bond and the match is
+  dropped.  Adding an output flag (e.g. --seqOut) after pieces already ran does
+  NOT invalidate sentinels -> done pieces emit nothing for it; use --force to rebuild.
 
 Deps: master (MASTER, grigoryanlab.org, e.g. /usr/local/bin); tqdm (optional).
 """
 import argparse
 import hashlib
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -132,10 +146,14 @@ def parse_args(argv):
                    help="pieces searched concurrently (cap only, not split size)")
     p.add_argument("--master", default=None, help="master binary (default: via PATH)")
     p.add_argument("--topN", type=int, default=100,
-                   help="keep best N matches globally (default 100; 0 = no limit)")
+                   help="keep best N matches per piece (forwarded to master; 0 = no limit)")
+    p.add_argument("--merged-topN", type=int, default=None,
+                   help="final top-N kept after merge (and --no-breakage). Default: same as --topN")
     p.add_argument("--minN", type=int, default=None, help="return at least N best matches (per piece)")
     p.add_argument("--gapLen", default=None, help="gap restraints, e.g. '1-10;0-3'")
     p.add_argument("--outType", default=None, help="match|full|wgap (region written by structOut)")
+    p.add_argument("--no-breakage", action="store_true",
+                   help="drop matches whose adjacent segments are not really peptide-bonded (C-to-N distance >= 1.4 A)")
     p.add_argument("--seqOut", default=None, help="also write match sequences, merged to this file")
     p.add_argument("--structOut", default=None, help="match structure dir (default: $out/structs)")
     p.add_argument("--matchOut", default=None, help="final merged match-address file (default: $out/match.txt)")
@@ -162,6 +180,8 @@ def validate(a):
         sys.exit("query must be a .pds file (run createPDS --type query first)")
     if not os.path.isfile(a.targetList):
         sys.exit("targetList not found: %s" % a.targetList)
+    if a.no_breakage and a.no_structs:
+        sys.exit("--no-breakage requires match structure output (cannot combine with --no-structs)")
 
 
 def count_lines(path):
@@ -268,6 +288,80 @@ def _rmsd(line):
         return float("inf")
 
 
+PEPTIDE_BOND = 1.4  # Angstrom: C-to-N peptide bond is ~1.33 A
+
+
+def _parse_segs(match_line):
+    """Return [(start,end), ...] residue ranges of each segment from a match line."""
+    return [(int(a), int(b)) for a, b in re.findall(r"\((\d+),(\d+)\)", match_line)]
+
+
+def _residue_list(pdb_path):
+    """Parse a struct PDB into an ordered list of [chain, resSeq, {atomname:(x,y,z)}]."""
+    residues = []
+    cur = None
+    for line in open(pdb_path):
+        if not line.startswith("ATOM"):
+            continue
+        chain = line[21]
+        try:
+            resseq = int(line[22:26])
+        except ValueError:
+            continue
+        name = line[12:16].strip()
+        x = float(line[30:38]); y = float(line[38:46]); z = float(line[46:54])
+        if cur is None or cur[0] != chain or cur[1] != resseq:
+            cur = [chain, resseq, {}]
+            residues.append(cur)
+        cur[2][name] = (x, y, z)
+    return residues
+
+
+def _dist(p, q):
+    return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2)
+
+
+def _has_breakage(struct_path, segs):
+    """True if any two adjacent segments are not really peptide-bonded.
+
+    For each adjacent pair (seg_i, seg_{i+1}) measure the distance between the C
+    of seg_i's last matched residue and the N of seg_{i+1}'s first matched residue
+    (coordinates come from the per-piece struct file). If that C-N distance is
+    >= PEPTIDE_BOND the two segments are not directly bonded (a real gap: loop
+    residue in between, chain break, or cross-chain) -> breakage.
+    """
+    if not os.path.isfile(struct_path):
+        return True
+    residues = _residue_list(struct_path)
+    if not residues:
+        return True
+    n = len(residues)
+    lengths = [b - a + 1 for a, b in segs]
+    gaps = [segs[i + 1][0] - segs[i][1] - 1 for i in range(len(segs) - 1)]
+    # If the struct file holds the segments plus their gap residues (outType wgap)
+    # its residue count is sum(lengths)+sum(gaps); otherwise (outType match) it is
+    # just sum(lengths) and the gap residues are absent. Coordinates are real in
+    # both cases, so only the position arithmetic changes.
+    if sum(lengths) + sum(gaps) == n:
+        eff_gaps = gaps
+    else:
+        eff_gaps = [0] * len(gaps)
+    cum = 0
+    for i in range(len(segs) - 1):
+        last_idx = cum + lengths[i]
+        first_idx = cum + lengths[i] + eff_gaps[i] + 1
+        if last_idx > n or first_idx > n:
+            return True
+        c = residues[last_idx - 1][2].get("C")
+        nn = residues[first_idx - 1][2].get("N")
+        if c is None or nn is None:
+            return True
+        if _dist(c, nn) >= PEPTIDE_BOND:
+            return True
+        cum += lengths[i] + eff_gaps[i]
+    return False
+
+
 def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out, struct_root):
     """Merge done pieces into the global top-N, RMSD-sorted.
 
@@ -301,14 +395,27 @@ def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out, struc
                     rows.append((_rmsd(ml), order, ml, None, i, lidx))
                     order += 1
     rows.sort(key=lambda t: (t[0], t[1]))
-    if a.topN and len(rows) > a.topN:
-        rows = rows[:a.topN]
+    if a.no_breakage:
+        before = len(rows)
+        kept = []
+        for row in rows:
+            segs = _parse_segs(row[2])
+            spath = os.path.join(pieces_root, "piece.%d" % row[4], "structs",
+                                 "match%d.pdb" % (row[5] + 1))
+            if not _has_breakage(spath, segs):
+                kept.append(row)
+        rows = kept
+        log("  no-breakage: kept %d / %d (dropped %d with real gaps)" %
+            (len(rows), before, before - len(rows)))
+    n_final = a.merged_topN if a.merged_topN is not None else a.topN
+    if n_final and len(rows) > n_final:
+        rows = rows[:n_final]
 
     with open(match_out, "w") as mf:
         for _r, _o, ml, _sl, _i, _l in rows:
             mf.write(ml)
     log("  merged %d matches (RMSD-sorted%s) -> %s" % (
-        len(rows), ", top %d" % a.topN if a.topN else "", match_out))
+        len(rows), ", top %d" % n_final if n_final else "", match_out))
     if seq_out:
         with open(seq_out, "w") as sf:
             for _r, _o, _ml, sl, _i, _l in rows:
