@@ -26,13 +26,15 @@ stale "done" can never wrongly skip work that now needs doing.
 Output layout (differs from the bash version -- fixes two bugs):
 
   OUT/
-    match.txt                  merged match-address file (default --matchOut)
-    seqs.txt                   merged match sequences      (if --seqOut)
+    match.txt                  merged match-address file, global top-N, RMSD-sorted
+    seqs.txt                   merged match sequences, aligned to match.txt (if --seqOut)
     structs/                   final --structOut dir (default OUT/structs)
-      piece.<i>/match1.pdb ... per-piece subdir  <-- no cross-piece overwrite
+      match<n>.pdb             globally ranked n-th match (match1.pdb = overall best)
     pieces/
       piece.<i>/match.txt      per-piece match (result, NOT hidden in .chunks)
       piece.<i>/seq.txt        per-piece seq  (if --seqOut)
+      piece.<i>/structs/       per-piece match structures match1.pdb, ... (no
+                               cross-piece overwrite, numbered within the piece)
     .chunks/                   WORK/metadata only: fingerprint, targets.<i>,
                                run.<i>.log, done.<i> sentinels. No result files.
 
@@ -41,7 +43,8 @@ Bugs fixed vs. the bash original:
      output `match1.pdb, match2.pdb, ...` (numbered from 1, see Search.cpp
      renameStruct). Running pieces concurrently into ONE shared --structOut dir
      made piece N clobber piece M's `matchN.pdb`. Fix: each piece writes into its
-     own --structOut/piece.<i>/ subdir.
+     own pieces/piece.<i>/structs/ subdir, and the final structs/match<n>.pdb are
+     renumbered by GLOBAL rank at merge time.
   2. Per-piece match files no longer land in the hidden .chunks work dir. They
      now live under OUT/pieces/piece.<i>/ (real results), while .chunks holds
      only resume metadata (fingerprint, sentinels, logs).
@@ -128,7 +131,8 @@ def parse_args(argv):
     p.add_argument("--njobs", type=int, default=8,
                    help="pieces searched concurrently (cap only, not split size)")
     p.add_argument("--master", default=None, help="master binary (default: via PATH)")
-    p.add_argument("--topN", type=int, default=None, help="keep best N matches (per piece)")
+    p.add_argument("--topN", type=int, default=100,
+                   help="keep best N matches globally (default 100; 0 = no limit)")
     p.add_argument("--minN", type=int, default=None, help="return at least N best matches (per piece)")
     p.add_argument("--gapLen", default=None, help="gap restraints, e.g. '1-10;0-3'")
     p.add_argument("--outType", default=None, help="match|full|wgap (region written by structOut)")
@@ -228,7 +232,7 @@ def build_cmd(a, piece_list, match_out, seq_out, struct_dir):
     return cmd
 
 
-def run_piece(a, i, work_dir, pieces_root, struct_root):
+def run_piece(a, i, work_dir, pieces_root):
     """Search piece i. Returns (ok, msg). Writes .done sentinel on success."""
     piece_dir = os.path.join(pieces_root, "piece.%d" % i)
     os.makedirs(piece_dir, exist_ok=True)
@@ -237,7 +241,8 @@ def run_piece(a, i, work_dir, pieces_root, struct_root):
     seq_out = os.path.join(piece_dir, "seq.txt") if a.seqOut else None
     struct_dir = None
     if not a.no_structs:
-        struct_dir = os.path.join(struct_root, "piece.%d" % i)
+        # per-piece structs live INSIDE the piece dir: pieces/piece.<i>/structs/
+        struct_dir = os.path.join(piece_dir, "structs")
         os.makedirs(struct_dir, exist_ok=True)
     run_log = os.path.join(work_dir, "run.%d.log" % i)
     cmd = build_cmd(a, piece_list, match_out, seq_out, struct_dir)
@@ -263,14 +268,20 @@ def _rmsd(line):
         return float("inf")
 
 
-def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out):
-    """Merge done pieces, sort globally by RMSD ascending, keep overall top-N.
+def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out, struct_root):
+    """Merge done pieces into the global top-N, RMSD-sorted.
 
-    Collects (match, seq) pairs in piece order, sorts by the match line's RMSD
-    (stable on ties), truncates to --topN if set, and writes BOTH files in the
-    same sorted order so a match line and its sequence stay aligned.
+    For each done piece, collect every (match line, seq line) and remember which
+    piece + local index it came from (local index maps 1:1 to that piece's
+    per-piece struct file match<local_index+1>.pdb). Sort all rows by the match
+    line's RMSD ascending (stable on ties) and truncate to --topN if set, then:
+
+      - match.txt      <- merged match lines (top-N, RMSD-sorted)
+      - seqs.txt       <- merged seq lines, aligned to the match lines
+      - structs/<n>.pdb <- per-piece struct file renamed by GLOBAL rank n, so
+                           structs/match1.pdb is the overall best match.
     """
-    rows = []  # (rmsd, order, match_line, seq_line_or_None)
+    rows = []  # (rmsd, order, match_line, seq_line_or_None, piece_i, local_idx)
     order = 0
     for i in range(1, npieces + 1):
         if not os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
@@ -281,28 +292,43 @@ def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out):
             continue
         if ps:
             with open(pm) as mf, open(ps) as sf:
-                for ml in mf:
-                    rows.append((_rmsd(ml), order, ml, sf.readline()))
+                for lidx, ml in enumerate(mf):
+                    rows.append((_rmsd(ml), order, ml, sf.readline(), i, lidx))
                     order += 1
         else:
             with open(pm) as mf:
-                for ml in mf:
-                    rows.append((_rmsd(ml), order, ml, None))
+                for lidx, ml in enumerate(mf):
+                    rows.append((_rmsd(ml), order, ml, None, i, lidx))
                     order += 1
     rows.sort(key=lambda t: (t[0], t[1]))
     if a.topN and len(rows) > a.topN:
         rows = rows[:a.topN]
+
     with open(match_out, "w") as mf:
-        for _r, _o, ml, _sl in rows:
+        for _r, _o, ml, _sl, _i, _l in rows:
             mf.write(ml)
     log("  merged %d matches (RMSD-sorted%s) -> %s" % (
         len(rows), ", top %d" % a.topN if a.topN else "", match_out))
     if seq_out:
         with open(seq_out, "w") as sf:
-            for _r, _o, _ml, sl in rows:
+            for _r, _o, _ml, sl, _i, _l in rows:
                 if sl is not None:
                     sf.write(sl)
         log("  merged %d seqs (aligned to matches) -> %s" % (len(rows), seq_out))
+
+    if struct_root:
+        # renumber per-piece structs by GLOBAL rank
+        for name in os.listdir(struct_root):
+            if name.startswith("match") and name.endswith(".pdb"):
+                os.remove(os.path.join(struct_root, name))
+        n_struct = 0
+        for rank, (_r, _o, _ml, _sl, pi, li) in enumerate(rows, start=1):
+            src = os.path.join(pieces_root, "piece.%d" % pi, "structs",
+                               "match%d.pdb" % (li + 1))
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(struct_root, "match%d.pdb" % rank))
+                n_struct += 1
+        log("  merged %d structs (global rank) -> %s" % (n_struct, struct_root))
 
 
 def main(argv):
@@ -347,11 +373,6 @@ def main(argv):
         os.makedirs(pieces_root, exist_ok=True)
         with open(fp_file, "w") as f:
             f.write(newfp + "\n")
-        # remove stale per-piece struct subdirs from a previous split
-        if struct_root:
-            for name in os.listdir(struct_root):
-                if name.startswith("piece."):
-                    shutil.rmtree(os.path.join(struct_root, name), ignore_errors=True)
         if a.force:
             log("Forcing reprocess of all pieces.")
 
@@ -373,7 +394,7 @@ def main(argv):
             todo.append(i)
     if todo:
         with ProcessPoolExecutor(max_workers=a.njobs) as ex:
-            futs = {ex.submit(run_piece, a, i, work_dir, pieces_root, struct_root): i
+            futs = {ex.submit(run_piece, a, i, work_dir, pieces_root): i
                     for i in todo}
             for fut in as_completed(futs):
                 i = futs[fut]
@@ -392,7 +413,7 @@ def main(argv):
         pbar.close()
 
     # ---- merge finished pieces ----
-    merge_from_done(a, npieces, work_dir, pieces_root, match_out, a.seqOut)
+    merge_from_done(a, npieces, work_dir, pieces_root, match_out, a.seqOut, struct_root)
 
     if failed > 0:
         log("WARNING: %d pieces failed. Re-run the same command to resume "

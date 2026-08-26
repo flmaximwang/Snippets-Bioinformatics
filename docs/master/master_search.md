@@ -22,13 +22,14 @@ Files produced under `--out`:
 
 ```
 out/
-  match.txt          final merged match-address file (one line per match)
-  seqs.txt           merged match sequences (only if --seqOut given)
-  structs/           match structures in PDB format (unless --no-structs)
-    piece.<i>/       per-piece subdir: match1.pdb, match2.pdb, ... (see below)
+  match.txt          merged match-address file — global top-N (default 100), RMSD-sorted
+  seqs.txt           merged match sequences, aligned to match.txt (only if --seqOut)
+  structs/           globally ranked match structures (unless --no-structs)
+    match<n>.pdb     n-th best match overall (match1.pdb = overall best)
   pieces/
-    piece.<i>/match.txt   piece i's matches        (before merge)
-    piece.<i>/seq.txt     piece i's match sequences (before merge)
+    piece.<i>/match.txt    piece i's matches       (before merge)
+    piece.<i>/seq.txt      piece i's sequences     (before merge, if --seqOut)
+    piece.<i>/structs/     piece i's own structures: match1.pdb, match2.pdb, ...
   master_search.log  run log
   .chunks/           work/metadata only — NO result files
     targets.<i>      piece i's slice of the targetList
@@ -41,7 +42,9 @@ out/
 (numbered from 1, regardless of the target — see `Search.cpp` `renameStruct`).
 Writing all pieces into ONE flat `--structOut` dir would make concurrent pieces
 clobber each other's `matchN.pdb`, so each piece writes into its own
-`structs/piece.<i>/` subdir instead.
+`pieces/piece.<i>/structs/` subdir. At merge time those per-piece files are
+renumbered by GLOBAL rank into the flat `structs/match<n>.pdb`, so
+`structs/match1.pdb` is the overall best match (rank n matches `match.txt` line n).
 
 ---
 
@@ -204,7 +207,7 @@ per piece (so a piece never carries more than N candidates, keeping per-piece
 files small) **and** re-applied after the merge, where all pieces' matches are
 sorted by RMSD ascending and truncated to the overall best N.
 
-- **Input:** a non-negative integer (0 = no limit, the default).
+- **Input:** a non-negative integer (default `100`; `0` = no limit).
 - **Effect:** forwarded as `master --topN` (also speeds search: it lets `master`
   lower the effective threshold once N matches are found), then re-applied
   globally at merge time. The merged `match.txt` is RMSD-sorted.
@@ -291,13 +294,18 @@ Also write match sequences, **merged** to this file. Off by default.
 Directory for match **structures** in PDB format (one PDB per match, written
 optimally superimposed onto the query over the matching region).
 
-- **Input:** an output dir. Default `$out/structs`.
+- **Input:** an output dir. Default `$out/structs`. This is the **final, flat**
+  merged-structures dir — per-piece structures are written to
+  `pieces/piece.<i>/structs/` (see layout above).
 - **Effect:** `master` numbers every piece's output `match1.pdb, match2.pdb, ...`
   starting from 1 (it does **not** name files after the target — see `Search.cpp`
   `renameStruct`). Writing all pieces into ONE flat dir would make concurrent
   pieces overwrite each other's `matchN.pdb`, so each piece writes into its own
-  `--structOut/piece.<i>/` subdir. The region written is governed by `--outType`.
-- **Example produced file:** `structs/piece.1/match1.pdb`.
+  `pieces/piece.<i>/structs/` subdir. At merge time the per-piece files are
+  renumbered by GLOBAL rank into `--structOut/match<n>.pdb` (rank n = the n-th
+  lowest-RMSD match, matching `match.txt` line n). The region written is governed
+  by `--outType`.
+- **Example produced file:** `structs/match1.pdb` (the overall best match).
 
 ### `--outType <t>`
 
@@ -404,7 +412,7 @@ the union of all `.done` pieces.
 | `--chunk-size` | `10000` | int | structures per piece = resume granularity |
 | `--njobs` | `8` | int | max concurrent pieces (cap only) |
 | `--bbRMSD` | off | flag | full-backbone RMSD metric |
-| `--topN` | `0` | int | keep best N matches (per piece) |
+| `--topN` | `100` | int | keep best N matches globally (0 = no limit) |
 | `--minN` | `0` | int | return ≥N best matches (per piece) |
 | `--gapLen` | — | str | gap-length restraints, `'min-max;...'` |
 | `--outType` | `match` | str | `match`\|`full`\|`wgap` region for structs/seqs |

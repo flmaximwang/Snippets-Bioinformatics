@@ -107,12 +107,13 @@ Parallelism & resume both come from **splitting `--targetList`**:
 - A fingerprint of (targetList content + `--chunk-size`) invalidates all
   sentinels if either changes, so stale "done" can never skip needed work.
 
-Per-piece match/seq go under `out/pieces/piece.<i>/`; match structures go into
-per-piece subdirs `out/structs/piece.<i>/` (each piece numbers its own structs
-`match1.pdb, ...` from 1, so a shared flat dir would overwrite — subdirs keep
-them apart). `out/.chunks/` holds only work metadata (fingerprint, `done.<i>`
-sentinels, logs). Final merged outputs: `out/match.txt`, optional `out/seqs.txt`,
-and the `out/structs/piece.<i>/` structs.
+Per-piece match/seq/structs live under `out/pieces/piece.<i>/` (match.txt,
+optional seq.txt, `structs/match1.pdb, ...` — each piece numbers its own structs
+from 1, so a shared flat dir would overwrite). `out/.chunks/` holds only work
+metadata (fingerprint, `done.<i>` sentinels, logs). Final merged outputs:
+`out/match.txt` = the global top-N (default 100) sorted by RMSD, optional
+`out/seqs.txt` aligned to it, and `out/structs/match<n>.pdb` = the globally
+ranked n-th match structure (match1.pdb = overall best).
 
     python3 snippet/master_search.py \\
       --query query/1akha.pds --targetList target_list.txt --rmsdCut 3.0 \\
