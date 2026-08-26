@@ -123,6 +123,19 @@ build). Note `--topN`/`--minN` apply per piece, not globally.
 Full per-parameter reference (every flag with input + effect examples):
 `docs/master/master_search.md`.
 
+## Vendored third-party code (external/)
+
+- `external/master-v1.6/` — MASTER (Method of Accelerated Search for Tertiary
+  Ensemble Representatives) v1.6 source, from grigoryanlab.org/master.
+  Copyright (C) 2014 Jianfu Zhou, Gevorg Grigoryan. The source files carry a
+  GNU **LGPL v3** header; the bundled COPYING is the **GPL v3** text (an
+  upstream packaging inconsistency). Vendored verbatim and unmodified, kept
+  separate from this repo's own code. If used in a publication, cite Zhou &
+  Grigoryan, *Protein Science* 24:508–524 (2015), doi:10.1002/pro.2610.
+
+This repo itself is MIT (see LICENSE); bundled third-party code keeps its own
+license and does not relicense the rest of the repo.
+
 ## Dependencies
 
 Get `biorazer` from Github.

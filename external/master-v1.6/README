@@ -1,0 +1,64 @@
+MASTER (Method of Accelerated Search for Tertiary Ensemble Representatives)
+is an open-source C++ program for performing structural-similarity searches.
+Copyright (C) 2014 Jianfu Zhou, Gevorg Grigoryan
+
+Web site: http://www.grigoryanlab.org/master/
+
+If used in a scientific publication, please cite: Zhou, Grigoryan (2015), 
+"Rapid search for tertiary fragments reveals protein sequence–structure 
+relationships". Protein Science, 24: 508–524. doi: 10.1002/pro.2610
+
+Contact:
+Gevorg Grigoryan
+gevorg.grigoryan@dartmouth.edu
+Dartmouth College
+
+
+==== A quick usage guide ====
+
+To use MASTER you need a query and a database. Both of these are 
+created using the createPDS tool. PDS stands for ?Protein Data 
+Structure? and, as the name suggests, this tool takes as input a PDB 
+structure and produces a file representing it that will later be used 
+as either a query or one of the database entries in a MASTER search. 
+Converting PDB files into PDS files enables MASTER to search rapidly 
+by representing the structure in a manner amenable to fast lookups 
+(see Zhou and Grigoryan, 2015). Here are some example commands:
+
+<path>/createPDS --type query --pdb myQuery.pdb --pds myQuery.pds
+<path>/createPDS --type target --pdb struct123.pdb --pds /my/database/str123.pds
+
+The first command prepares a query entry, myQuery.pds, whereas the 
+second command processes structure struct123.pdb to be one of the 
+database entries, placing it into some appropriate location on the 
+file system (/my/database/str123.pds). The second command would be 
+repeated for all structures making up the database, with a list of 
+all corresponding PDS files (i.e., their full paths) compiled into a 
+single list file to be used in searching. Execute createPDS without 
+any options to see the list of all options?many features are 
+available, including processing lists of files and breaking up large 
+PDB structures with internal redundancies (e.g., virus structures) 
+into their minimal units that preserve all unique chains and unique 
+interfaces.
+
+Once a query and a database (with its list file) are ready, MASTER 
+can be used to perform the search. For example:
+
+<path>/master --query myQuery.pds --targetList database.list 
+--rmsdCut 1.6 --bbRMSD --matchOut myQuery.match 
+--seqOut myQuery.seq --structOut myQuery.struct 
+--outType match
+
+This will search the database listed in database.list for all 
+substructures within 1.6 A full-backbone RMSD (because --bbRMSD 
+was specified) of the query in myQuery.pds. Note that the query 
+may have one or more disjoint segments. Information on the matches 
+(i.e., which database entry they come from and what indices each 
+disjoint segment in the query maps to) is output into myQuery.match, 
+one match per line. Sequences of the matching regions, in the order 
+of residues in the query, are output into myQuery.seq, one match per 
+line. The full-backbone RMSD of each match is also listed in this 
+file in the first column. Finally, structures of matching regions 
+are written into myQuery.struct/ directory, one file per match (full 
+matches can also be output). Execute master by itself for the full 
+list of options.
