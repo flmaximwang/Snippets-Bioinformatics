@@ -115,9 +115,10 @@ metadata (fingerprint, `done.<i>` sentinels, logs). Final merged outputs:
 `out/seqs.txt` aligned to it, and `out/structs/match<n>.pdb` = the globally
 ranked n-th match structure (match1.pdb = overall best).
 
-    python3 snippet/master_search.py \\
+    python3 snippet/master_search.py search \\
       --query query/1akha.pds --targetList target_list.txt --rmsdCut 3.0 \\
       --out out --njobs 8 --chunk-size 10000 [--bbRMSD] [--topN N]
+    python3 snippet/master_search.py merge --out out [--merged-topN N] [--no-breakage]
 
 Query PDB → PDS must be done beforehand:
 `createPDS --type query --pdb in.pdb --pds in.pds --dCut 25.0 --dStep 5.0

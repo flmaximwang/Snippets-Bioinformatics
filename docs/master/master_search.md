@@ -48,16 +48,24 @@ renumbered by GLOBAL rank into the flat `structs/match<n>.pdb`, so
 
 ---
 
-## Full usage
+## Full usage (two steps: search, then merge)
 
-```
-python3 master_search.py \
+```sh
+# step 1 — piece-wise search (parallel, resumable), writes OUT/pieces/
+python3 master_search.py search \
   --query <q.pds> --targetList <list> --rmsdCut <X> --out <dir> \
-  [--chunk-size N] [--njobs N] \
-  [--bbRMSD] [--topN N] [--merged-topN N] [--minN N] [--gapLen S] [--outType T] \
-  [--no-breakage] [--seqOut FILE] [--no-structs] [--structOut DIR] [--matchOut FILE] \
-  [--master PATH] [--force]
+  [--chunk-size N] [--njobs N] [--bbRMSD] [--topN N] [--minN N] \
+  [--gapLen S] [--outType T] [--seqOut FILE] [--no-structs] [--master PATH] [--force]
+
+# step 2 — merge finished pieces into final match.txt / seqs.txt / structs/
+python3 master_search.py merge --out <dir> \
+  [--merged-topN N] [--topN N] [--no-breakage] [--seqOut FILE] \
+  [--no-structs] [--structOut DIR] [--matchOut FILE]
 ```
+
+`merge` only reads the finished pieces under `--out`, so it can be re-run any
+number of times (e.g. to change `--merged-topN` / `--no-breakage`) without
+re-searching.
 
 **Prerequisite — the query must already be PDS.** `master` cannot read a raw PDB.
 Convert before calling:
@@ -395,37 +403,49 @@ Flag. Reprocess every piece even if `.done` sentinels exist.
 
 Build a 3-piece search and show the piece split:
 
-```
+```sh
 # 11 targets -> --chunk-size 4 => 3 pieces: [4][4][3]
-python3 snippet/master_search.py \
+# step 1: search
+python3 snippet/master_search.py search \
   --query query/1akha.pds --targetList db/target_list.txt --rmsdCut 3.0 \
   --out searches/a --njobs 3 --chunk-size 4 \
   --bbRMSD --topN 5000 --seqOut searches/a/seqs.txt
+# step 2: merge
+python3 snippet/master_search.py merge --out searches/a --merged-topN 5000
 ```
 
-Log:
+`search` log:
 
-```
+```sh
 Searching 11 targets ... (pieces=3, per-piece<=4, njobs=3 cap, rmsdCut=3.0)
   piece 1: OK (2 matches)
   piece 2: OK (5 matches)
   piece 3: OK (1 match)
-  merged 8 matches -> searches/a/match.txt
-  merged seqs -> searches/a/seqs.txt
+All 3 pieces done. Run `master_search.py merge --out searches/a` to merge results.
 ```
 
-You are interrupted after pieces 1–2 finish. Rerun the **same command**:
+`merge` log:
 
+```sh
+merged 8 matches (RMSD-sorted, top 5000) -> searches/a/match.txt
+merged 8 seqs (aligned to matches) -> searches/a/seqs.txt
+merged 8 structs (global rank) -> searches/a/structs
 ```
+
+You are interrupted after pieces 1–2 finish. Re-running `search` resumes only the
+unfinished piece:
+
+```sh
 Resuming: --targetList / --chunk-size unchanged since previous run.
   piece 1: already done (resume skip)
   piece 2: already done (resume skip)
   piece 3: OK (1 match)
-  merged 8 matches -> searches/a/match.txt
+All 3 pieces done. Run `master_search.py merge --out searches/a` to merge results.
 ```
 
-Only piece 3 was searched again; 1–2 were reused, and the merge is recomputed from
-the union of all `.done` pieces.
+Only piece 3 was searched again; 1–2 were reused. `merge` then recomputes the
+final outputs from the union of all `.done` pieces — re-run `merge` any time
+(e.g. after changing `--merged-topN` / `--no-breakage`) without re-searching.
 
 ---
 

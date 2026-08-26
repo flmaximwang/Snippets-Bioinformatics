@@ -49,33 +49,42 @@ Bugs fixed vs. the bash original:
      now live under OUT/pieces/piece.<i>/ (real results), while .chunks holds
      only resume metadata (fingerprint, sentinels, logs).
 
-Usage:
-  master_search.py --query <q.pds> --targetList <list> --rmsdCut <X> \
-                   --out <dir> [options]
+Usage (two steps: search then merge):
 
-Required:
-  --query <q.pds>          query structure already converted to PDS
-  --targetList <list>      file, one target .pds path per line (the database)
-  --rmsdCut <x>            RMSD cutoff (Angstrom) for a match
-  --out <dir>              output root (per-piece files + final merged results)
+  master_search.py search --query <q.pds> --targetList <list> --rmsdCut <X> \
+                          --out <dir> [search options]
+  master_search.py merge --out <dir> [merge options]
 
-Options / passthrough to `master`:
+`search` builds the piece lists, runs one `master` job per piece (parallel,
+resumable via .done sentinels) and writes the per-piece results under
+OUT/pieces/. `merge` combines the finished pieces into the final OUT/match.txt,
+OUT/seqs.txt and OUT/structs/ (RMSD-sorted, global top-N, optional
+--no-breakage). `merge` can be re-run any number of times on the same OUT (it
+only reads the finished pieces), so you can change --merged-topN / --no-breakage
+without re-searching.
+
+Search options (required: --query --targetList --rmsdCut --out):
   --chunk-size <N>          structures per piece (default 10000); sets the resume granularity
   --njobs <N>               how many pieces to search concurrently (default 8)
   --bbRMSD                  full-backbone RMSD instead of CA-only
   --topN <N>                keep best N matches per piece (forwarded to master; 0 = no limit)
-  --merged-topN <N>         final top-N kept after merge + --no-breakage (default: same as --topN)
-  --no-breakage             drop matches whose adjacent segments are not really
-                            peptide-bonded (C-to-N distance of boundary residues >= 1.4 A)
   --minN <N>                return at least N best matches (per piece)
   --gapLen <s>              gap restraints, e.g. '1-10;0-3'
   --outType <t>             match|full|wgap (region written by structOut)
-  --seqOut <file>           also write match sequences, merged to this file
-  --no-structs              do not write match structures (default: writes $out/structs)
-  --structOut <dir>         match structure dir  (default: $out/structs)
-  --matchOut <file>         final merged match-address file (default: $out/match.txt)
+  --seqOut <file>           also write per-piece match sequences (for the later merge)
+  --no-structs              do not write match structures
   --master <path>           master binary (default: found via PATH)
   --force                   reprocess all pieces even if done
+
+Merge options (required: --out):
+  --merged-topN <N>         final top-N kept after merge + --no-breakage (default: same as --topN)
+  --topN <N>                default for --merged-topN when not given
+  --no-breakage             drop matches whose adjacent segments are not really
+                            peptide-bonded (C-to-N distance of boundary residues >= 1.4 A)
+  --seqOut <file>           also write match sequences, merged to this file
+  --no-structs              do not write match structures
+  --structOut <dir>         match structure dir  (default: $out/structs)
+  --matchOut <file>         final merged match-address file (default: $out/match.txt)
 
 Notes:
   --topN is a PER-PIECE cap: it is forwarded to each master piece so a piece
@@ -130,37 +139,63 @@ def log(msg):
         print(line, file=sys.stderr)
 
 
-def parse_args(argv):
+def build_parser():
     p = argparse.ArgumentParser(
         prog="master_search.py",
-        description="Parallel, resumable MASTER structural-motif search (query side only).",
+        description="Parallel, resumable MASTER structural-motif search (query side only). "
+                    "Two steps: `search` runs the piece-wise search, `merge` merges results.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--query", required=True, help="query structure already converted to PDS")
-    p.add_argument("--targetList", required=True, help="file, one target .pds path per line")
-    p.add_argument("--rmsdCut", required=True, help="RMSD cutoff (Angstrom) for a match")
-    p.add_argument("--out", required=True, help="output root")
-    p.add_argument("--chunk-size", dest="chunk_size", type=int, default=10000,
-                   help="structures per piece; the resume granularity")
-    p.add_argument("--njobs", type=int, default=8,
-                   help="pieces searched concurrently (cap only, not split size)")
-    p.add_argument("--master", default=None, help="master binary (default: via PATH)")
-    p.add_argument("--topN", type=int, default=100,
-                   help="keep best N matches per piece (forwarded to master; 0 = no limit)")
-    p.add_argument("--merged-topN", type=int, default=None,
-                   help="final top-N kept after merge (and --no-breakage). Default: same as --topN")
-    p.add_argument("--minN", type=int, default=None, help="return at least N best matches (per piece)")
-    p.add_argument("--gapLen", default=None, help="gap restraints, e.g. '1-10;0-3'")
-    p.add_argument("--outType", default=None, help="match|full|wgap (region written by structOut)")
-    p.add_argument("--no-breakage", action="store_true",
-                   help="drop matches whose adjacent segments are not really peptide-bonded (C-to-N distance >= 1.4 A)")
-    p.add_argument("--seqOut", default=None, help="also write match sequences, merged to this file")
-    p.add_argument("--structOut", default=None, help="match structure dir (default: $out/structs)")
-    p.add_argument("--matchOut", default=None, help="final merged match-address file (default: $out/match.txt)")
-    p.add_argument("--bbRMSD", action="store_true", help="full-backbone RMSD instead of CA-only")
-    p.add_argument("--no-structs", action="store_true", help="do not write match structures")
-    p.add_argument("--force", action="store_true", help="reprocess all pieces even if done")
-    return p.parse_args(argv)
+    sub = p.add_subparsers(dest="command", metavar="{search,merge}")
+    sub.required = True
+
+    # ---- search: build pieces + run master (no merge) ----
+    ps = sub.add_parser("search",
+                        help="run the piece-wise MASTER search (no merge)",
+                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ps.add_argument("--query", required=True, help="query structure already converted to PDS")
+    ps.add_argument("--targetList", required=True, help="file, one target .pds path per line")
+    ps.add_argument("--rmsdCut", required=True, help="RMSD cutoff (Angstrom) for a match")
+    ps.add_argument("--out", required=True, help="output root")
+    ps.add_argument("--chunk-size", dest="chunk_size", type=int, default=10000,
+                    help="structures per piece; the resume granularity")
+    ps.add_argument("--njobs", type=int, default=8,
+                    help="pieces searched concurrently (cap only, not split size)")
+    ps.add_argument("--master", default=None, help="master binary (default: via PATH)")
+    ps.add_argument("--topN", type=int, default=100,
+                    help="keep best N matches per piece (forwarded to master; 0 = no limit)")
+    ps.add_argument("--minN", type=int, default=None, help="return at least N best matches (per piece)")
+    ps.add_argument("--gapLen", default=None, help="gap restraints, e.g. '1-10;0-3'")
+    ps.add_argument("--outType", default=None, help="match|full|wgap (region written by structOut)")
+    ps.add_argument("--seqOut", default=None,
+                    help="also write per-piece match sequences (for the later merge)")
+    ps.add_argument("--bbRMSD", action="store_true", help="full-backbone RMSD instead of CA-only")
+    ps.add_argument("--no-structs", action="store_true", help="do not write match structures")
+    ps.add_argument("--force", action="store_true", help="reprocess all pieces even if done")
+    ps.set_defaults(func=cmd_search)
+
+    # ---- merge: combine finished pieces into final outputs ----
+    pm = sub.add_parser("merge",
+                        help="merge finished piece results into final outputs",
+                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    pm.add_argument("--out", required=True, help="output root written by `search`")
+    pm.add_argument("--topN", type=int, default=100,
+                    help="default for --merged-topN when it is not given")
+    pm.add_argument("--merged-topN", type=int, default=None,
+                    help="final top-N kept after merge (and --no-breakage). Default: same as --topN")
+    pm.add_argument("--matchOut", default=None,
+                    help="final merged match-address file (default: $out/match.txt)")
+    pm.add_argument("--seqOut", default=None,
+                    help="also write match sequences, merged to this file")
+    pm.add_argument("--structOut", default=None,
+                    help="match structure dir (default: $out/structs)")
+    pm.add_argument("--no-structs", action="store_true", help="do not write match structures")
+    pm.add_argument("--no-breakage", action="store_true",
+                    help="drop matches whose adjacent segments are not really peptide-bonded "
+                         "(C-to-N distance >= 1.4 A)")
+    pm.set_defaults(func=cmd_merge)
+
+    return p
 
 
 def validate(a):
@@ -180,8 +215,137 @@ def validate(a):
         sys.exit("query must be a .pds file (run createPDS --type query first)")
     if not os.path.isfile(a.targetList):
         sys.exit("targetList not found: %s" % a.targetList)
-    if a.no_breakage and a.no_structs:
-        sys.exit("--no-breakage requires match structure output (cannot combine with --no-structs)")
+
+
+def run_pieces(a, npieces, work_dir, pieces_root):
+    """Run unfinished pieces (njobs at once) with resume + tqdm. Returns failed count."""
+    failed = 0
+    pbar = tqdm(total=npieces, desc="searching pieces", unit="piece", leave=False) if tqdm else None
+    todo = []
+    for i in range(1, npieces + 1):
+        if os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
+            log("  piece %d: already done (resume skip)" % i)
+            if pbar:
+                pbar.update(1)
+        else:
+            todo.append(i)
+    if todo:
+        with ProcessPoolExecutor(max_workers=a.njobs) as ex:
+            futs = {ex.submit(run_piece, a, i, work_dir, pieces_root): i for i in todo}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    ok, msg = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    ok, msg = False, "unexpected error: %r" % e
+                if ok:
+                    log("  piece %d: OK (%s)" % (i, msg))
+                else:
+                    log("  piece %d FAILED: %s" % (i, msg))
+                    failed += 1
+                if pbar:
+                    pbar.update(1)
+    if pbar:
+        pbar.close()
+    return failed
+
+
+def cmd_search(a):
+    """`search`: build pieces, run master on each, write per-piece results + .done."""
+    global _LOG
+    validate(a)
+    a.out = os.path.abspath(a.out)
+    work_dir = os.path.join(a.out, ".chunks")
+    pieces_root = os.path.join(a.out, "pieces")
+    os.makedirs(a.out, exist_ok=True)
+    os.makedirs(work_dir, exist_ok=True)
+    os.makedirs(pieces_root, exist_ok=True)
+    _LOG = os.path.join(a.out, "master_search.log")
+
+    total = count_lines(a.targetList)
+    if total == 0:
+        log("targetList is empty: nothing to search.")
+        return 0
+
+    # ---- fingerprint: invalidate sentinels when the split input changes ----
+    # Split depends only on (targetList content) + PER_LIST, so NJOBS must NOT be
+    # in the fingerprint (changing --njobs must never force a redo).
+    newfp = fingerprint(a.targetList, a.chunk_size)
+    fp_file = os.path.join(work_dir, "fingerprint")
+    resume = False
+    if os.path.isfile(fp_file) and open(fp_file).read().strip() == newfp and not a.force:
+        resume = True
+        log("Resuming: --targetList / --chunk-size unchanged since previous run.")
+    if not resume:
+        # Clear the whole work area + per-piece results on a changed split (or --force).
+        shutil.rmtree(work_dir, ignore_errors=True)
+        shutil.rmtree(pieces_root, ignore_errors=True)
+        os.makedirs(work_dir, exist_ok=True)
+        os.makedirs(pieces_root, exist_ok=True)
+        with open(fp_file, "w") as f:
+            f.write(newfp + "\n")
+        if a.force:
+            log("Forcing reprocess of all pieces.")
+
+    npieces = write_piece_targets(a.targetList, total, a.chunk_size, work_dir)
+    log("Searching %d targets against query %s (pieces=%d, per-piece<=%d, "
+        "njobs=%d cap, rmsdCut=%s)" % (total, a.query, npieces,
+        a.chunk_size, a.njobs, a.rmsdCut))
+
+    failed = run_pieces(a, npieces, work_dir, pieces_root)
+    if failed > 0:
+        log("WARNING: %d pieces failed. Re-run `search` to resume "
+            "(only unfinished/failed pieces reprocess)." % failed)
+        return 2
+    log("All %d pieces done. Run `master_search.py merge --out %s` to merge results."
+        % (npieces, a.out))
+    return 0
+
+
+def cmd_merge(a):
+    """`merge`: combine finished pieces into final match.txt / seqs.txt / structs/."""
+    global _LOG
+    a.out = os.path.abspath(a.out)
+    work_dir = os.path.join(a.out, ".chunks")
+    pieces_root = os.path.join(a.out, "pieces")
+    match_out = a.matchOut or os.path.join(a.out, "match.txt")
+    struct_root = None if a.no_structs else (a.structOut or os.path.join(a.out, "structs"))
+    os.makedirs(a.out, exist_ok=True)
+    if struct_root:
+        os.makedirs(struct_root, exist_ok=True)
+    _LOG = os.path.join(a.out, "master_search.log")
+
+    npieces = 0
+    if os.path.isdir(work_dir):
+        for name in os.listdir(work_dir):
+            if name.startswith("done."):
+                npieces = max(npieces, int(name.split(".")[1]))
+    if npieces == 0:
+        log("No finished pieces under %s. Run `master_search.py search --out %s` first."
+            % (a.out, a.out))
+        return 1
+
+    if a.no_breakage:
+        any_struct = False
+        if os.path.isdir(pieces_root):
+            for i in range(1, npieces + 1):
+                sd = os.path.join(pieces_root, "piece.%d" % i, "structs")
+                if os.path.isdir(sd) and os.listdir(sd):
+                    any_struct = True
+                    break
+        if not any_struct:
+            log("--no-breakage needs per-piece match structures, but none were found. "
+                "Re-run `search` without --no-structs.")
+            return 1
+
+    merge_from_done(a, npieces, work_dir, pieces_root, match_out, a.seqOut, struct_root)
+    return 0
+
+
+def main(argv):
+    p = build_parser()
+    args = p.parse_args(argv)
+    return args.func(args)
 
 
 def count_lines(path):
@@ -436,98 +600,6 @@ def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out, struc
                 shutil.copyfile(src, os.path.join(struct_root, "match%d.pdb" % rank))
                 n_struct += 1
         log("  merged %d structs (global rank) -> %s" % (n_struct, struct_root))
-
-
-def main(argv):
-    global _LOG
-    a = parse_args(argv)
-    validate(a)
-
-    a.out = os.path.abspath(a.out)
-    work_dir = os.path.join(a.out, ".chunks")
-    pieces_root = os.path.join(a.out, "pieces")
-    match_out = a.matchOut or os.path.join(a.out, "match.txt")
-    if a.no_structs:
-        struct_root = None
-    else:
-        struct_root = a.structOut or os.path.join(a.out, "structs")
-        os.makedirs(struct_root, exist_ok=True)
-    os.makedirs(a.out, exist_ok=True)
-    os.makedirs(work_dir, exist_ok=True)
-    os.makedirs(pieces_root, exist_ok=True)
-    _LOG = os.path.join(a.out, "master_search.log")
-
-    total = count_lines(a.targetList)
-    if total == 0:
-        log("targetList is empty: nothing to search.")
-        open(match_out, "w").close()
-        return 0
-
-    # ---- fingerprint: invalidate sentinels when the split input changes ----
-    # Split depends only on (targetList content) + PER_LIST, so NJOBS must NOT be
-    # in the fingerprint (changing --njobs must never force a redo).
-    newfp = fingerprint(a.targetList, a.chunk_size)
-    fp_file = os.path.join(work_dir, "fingerprint")
-    resume = False
-    if os.path.isfile(fp_file) and open(fp_file).read().strip() == newfp and not a.force:
-        resume = True
-        log("Resuming: --targetList / --chunk-size unchanged since previous run.")
-    if not resume:
-        # Clear the whole work area + per-piece results on a changed split (or --force).
-        shutil.rmtree(work_dir, ignore_errors=True)
-        shutil.rmtree(pieces_root, ignore_errors=True)
-        os.makedirs(work_dir, exist_ok=True)
-        os.makedirs(pieces_root, exist_ok=True)
-        with open(fp_file, "w") as f:
-            f.write(newfp + "\n")
-        if a.force:
-            log("Forcing reprocess of all pieces.")
-
-    npieces = write_piece_targets(a.targetList, total, a.chunk_size, work_dir)
-    log("Searching %d targets against query %s (pieces=%d, per-piece<=%d, "
-        "njobs=%d cap, rmsdCut=%s)" % (total, a.query, npieces,
-        a.chunk_size, a.njobs, a.rmsdCut))
-
-    # ---- run pieces (njobs at once) with resume + tqdm progress ----
-    failed = 0
-    pbar = tqdm(total=npieces, desc="searching pieces", unit="piece", leave=False) if tqdm else None
-    todo = []
-    for i in range(1, npieces + 1):
-        if os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
-            log("  piece %d: already done (resume skip)" % i)
-            if pbar:
-                pbar.update(1)
-        else:
-            todo.append(i)
-    if todo:
-        with ProcessPoolExecutor(max_workers=a.njobs) as ex:
-            futs = {ex.submit(run_piece, a, i, work_dir, pieces_root): i
-                    for i in todo}
-            for fut in as_completed(futs):
-                i = futs[fut]
-                try:
-                    ok, msg = fut.result()
-                except Exception as e:  # noqa: BLE001
-                    ok, msg = False, "unexpected error: %r" % e
-                if ok:
-                    log("  piece %d: OK (%s)" % (i, msg))
-                else:
-                    log("  piece %d FAILED: %s" % (i, msg))
-                    failed += 1
-                if pbar:
-                    pbar.update(1)
-    if pbar:
-        pbar.close()
-
-    # ---- merge finished pieces ----
-    merge_from_done(a, npieces, work_dir, pieces_root, match_out, a.seqOut, struct_root)
-
-    if failed > 0:
-        log("WARNING: %d pieces failed. Re-run the same command to resume "
-            "(only unfinished/failed pieces reprocess)." % failed)
-        return 2
-    log("All %d pieces done." % npieces)
-    return 0
 
 
 if __name__ == "__main__":
