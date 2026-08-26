@@ -121,7 +121,8 @@ and the `out/structs/piece.<i>/` structs.
 Query PDB → PDS must be done beforehand:
 `createPDS --type query --pdb in.pdb --pds in.pds --dCut 25.0 --dStep 5.0
 --phiStep 10.0 --psiStep 10.0` (dCut/dStep/phiStep/psiStep must match the DB
-build). Note `--topN`/`--minN` apply per piece, not globally.
+build). `--topN` is a GLOBAL top-N (per-piece trim + re-rank by RMSD after the
+merge); `--minN` applies per piece. The merged `match.txt` is RMSD-sorted.
 
 Full per-parameter reference (every flag with input + effect examples):
 `docs/master/master_search.md`.

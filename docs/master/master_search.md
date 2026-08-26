@@ -179,8 +179,9 @@ change the split.
 
 ## `master` search-criteria options (passed through per piece)
 
-These are forwarded verbatim to each `master --targetList <piece>` call. They
-apply **per piece**, which matters for the two `N`-based ones below.
+These are forwarded verbatim to each `master --targetList <piece>` call. Most
+apply **per piece**; the exception is `--topN`, which is also re-applied globally
+at merge time (see below).
 
 ### `--bbRMSD`
 
@@ -198,33 +199,36 @@ Flag. Switch the metric from the default CA-only RMSD to full-backbone RMSD
 
 ### `--topN <N>`
 
-Keep only the best N matches (by the search metric) **per piece**; combined with
-`--rmsdCut`, it finds all matches within cutoff unless there are more than N, in
-which case only the top N are reported.
+Keep only the best N matches (by the search metric). It is **global**: applied
+per piece (so a piece never carries more than N candidates, keeping per-piece
+files small) **and** re-applied after the merge, where all pieces' matches are
+sorted by RMSD ascending and truncated to the overall best N.
 
 - **Input:** a non-negative integer (0 = no limit, the default).
-- **Effect:** passed as `master --topN`. Also speeds search: it lets `master`
-  lower the effective threshold once N matches are found.
+- **Effect:** forwarded as `master --topN` (also speeds search: it lets `master`
+  lower the effective threshold once N matches are found), then re-applied
+  globally at merge time. The merged `match.txt` is RMSD-sorted.
+- **Why both are safe (exactness):** a global top-N match is always inside some
+  piece's per-piece top-N — a piece that discards a match `m` has N matches with
+  RMSD ≤ `m`, so `m` can never rank in the global top-N. Per-piece trimming only
+  shrinks the candidate set, never drops a global-top candidate.
 
+```sh
+--rmsdCut 3.0 --topN 5000     # overall best 5000 across the whole database
 ```
---rmsdCut 3.0 --topN 5000     # all matches <=3A, or top 5000 if more
-```
-
-> ⚠️ **Limitation (design):** `--topN`/`--minN` are applied *per piece*, not
-> globally across the whole database. The concatenated `match.txt` therefore may
-> contain up to (N × pieces) matches. For a strict global top-N, size each piece
-> to N and rely on the merge, or re-rank `match.txt` by RMSD yourself.
 
 ### `--minN <N>`
 
 Return at least the N best matches (by the metric) regardless of `--rmsdCut`.
+`--minN` stays **per piece** (it widens the cutoff so a piece returns at least N
+matches); it does not change the final global top-N.
 
 - **Input:** a non-negative integer; if both `--minN` and `--topN` are given,
   `--minN` must be ≤ `--topN`. Default `0`.
 - **Effect:** passed as `master --minN`. Guarantees a minimum number of hits even
   when few structures fall within the cutoff.
 
-```
+```sh
 --rmsdCut 1.5 --minN 10       # at least 10 best matches, even above 1.5 A
 ```
 

@@ -60,7 +60,7 @@ Options / passthrough to `master`:
   --chunk-size <N>          structures per piece (default 10000); sets the resume granularity
   --njobs <N>               how many pieces to search concurrently (default 8)
   --bbRMSD                  full-backbone RMSD instead of CA-only
-  --topN <N>                keep best N matches (per piece, not global -- see Notes)
+  --topN <N>                keep best N matches (global top-N after merge, see Notes)
   --minN <N>                return at least N best matches (per piece)
   --gapLen <s>              gap restraints, e.g. '1-10;0-3'
   --outType <t>             match|full|wgap (region written by structOut)
@@ -72,9 +72,14 @@ Options / passthrough to `master`:
   --force                   reprocess all pieces even if done
 
 Notes:
-  --topN/--minN are applied PER PIECE, not globally across the whole database.
-  For a strict global top-N, set --topN per piece of equal size, or merge and
-  re-rank by RMSD yourself. This is a documented limitation of the split design.
+  --topN is a GLOBAL top-N: it is forwarded to each piece (so a piece never
+  carries more than N candidates, keeping per-piece files small) and then
+  re-applied after the merge, where all pieces' matches are sorted by RMSD
+  ascending and truncated to the overall best N. This is exact — a global top-N
+  match is always inside some piece's per-piece top-N (a piece that discards a
+  match m has N matches with RMSD <= m, so m can never rank in the global top-N).
+  --minN stays per piece (it widens the cutoff so a piece returns at least N
+  matches). The merged match.txt (and seqs.txt, aligned to it) is RMSD-sorted.
   Adding an output flag (e.g. --seqOut) after pieces already ran does NOT
   invalidate sentinels -> done pieces emit nothing for it; use --force to rebuild.
 
@@ -201,6 +206,12 @@ def build_cmd(a, piece_list, match_out, seq_out, struct_dir):
            "--rmsdCut", a.rmsdCut]
     if a.bbRMSD:
         cmd.append("--bbRMSD")
+    # --topN is forwarded per piece AND re-applied globally after the merge.
+    # Both are safe: a global top-N match is always inside some piece's top-N
+    # (proof: if a piece discards m there are N matches with RMSD <= m in it, so
+    # m cannot rank in the global top-N). Per-piece trimming only shrinks the
+    # candidate set / file sizes. --minN widens the cutoff per piece so a piece
+    # returns at least N matches.
     if a.topN is not None:
         cmd += ["--topN", str(a.topN)]
     if a.minN is not None:
@@ -244,32 +255,54 @@ def run_piece(a, i, work_dir, pieces_root, struct_root):
     return True, "%d matches" % nm
 
 
+def _rmsd(line):
+    """Leading RMSD of a match line (first whitespace-separated token)."""
+    try:
+        return float(line.split()[0])
+    except (ValueError, IndexError):
+        return float("inf")
+
+
 def merge_from_done(a, npieces, work_dir, pieces_root, match_out, seq_out):
-    n = 0
+    """Merge done pieces, sort globally by RMSD ascending, keep overall top-N.
+
+    Collects (match, seq) pairs in piece order, sorts by the match line's RMSD
+    (stable on ties), truncates to --topN if set, and writes BOTH files in the
+    same sorted order so a match line and its sequence stay aligned.
+    """
+    rows = []  # (rmsd, order, match_line, seq_line_or_None)
+    order = 0
+    for i in range(1, npieces + 1):
+        if not os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
+            continue
+        pm = os.path.join(pieces_root, "piece.%d" % i, "match.txt")
+        ps = os.path.join(pieces_root, "piece.%d" % i, "seq.txt") if seq_out else None
+        if not os.path.isfile(pm):
+            continue
+        if ps:
+            with open(pm) as mf, open(ps) as sf:
+                for ml in mf:
+                    rows.append((_rmsd(ml), order, ml, sf.readline()))
+                    order += 1
+        else:
+            with open(pm) as mf:
+                for ml in mf:
+                    rows.append((_rmsd(ml), order, ml, None))
+                    order += 1
+    rows.sort(key=lambda t: (t[0], t[1]))
+    if a.topN and len(rows) > a.topN:
+        rows = rows[:a.topN]
     with open(match_out, "w") as mf:
-        for i in range(1, npieces + 1):
-            if not os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
-                continue
-            pm = os.path.join(pieces_root, "piece.%d" % i, "match.txt")
-            if os.path.isfile(pm):
-                with open(pm) as f:
-                    for line in f:
-                        mf.write(line)
-                        n += 1
-    log("  merged %d matches -> %s" % (n, match_out))
+        for _r, _o, ml, _sl in rows:
+            mf.write(ml)
+    log("  merged %d matches (RMSD-sorted%s) -> %s" % (
+        len(rows), ", top %d" % a.topN if a.topN else "", match_out))
     if seq_out:
-        s = 0
         with open(seq_out, "w") as sf:
-            for i in range(1, npieces + 1):
-                if not os.path.isfile(os.path.join(work_dir, "done.%d" % i)):
-                    continue
-                ps = os.path.join(pieces_root, "piece.%d" % i, "seq.txt")
-                if os.path.isfile(ps):
-                    with open(ps) as f:
-                        for line in f:
-                            sf.write(line)
-                            s += 1
-        log("  merged %d seqs -> %s" % (s, seq_out))
+            for _r, _o, _ml, sl in rows:
+                if sl is not None:
+                    sf.write(sl)
+        log("  merged %d seqs (aligned to matches) -> %s" % (len(rows), seq_out))
 
 
 def main(argv):
