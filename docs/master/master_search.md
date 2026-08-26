@@ -1,15 +1,16 @@
-# master_search.sh — MASTER structural-motif query runner
+# master_search.py — MASTER structural-motif query runner
 
-`master_search.sh` runs the MASTER search binary (`master`) against a built PDS
+`master_search.py` runs the MASTER search binary (`master`) against a built PDS
 database, **query-side only**. It does not build the database (that's
 `snippet/create_master_db.sh`) and does not convert PDB→PDS (that's `createPDS`).
 It takes a query `.pds` and a `--targetList`, divides the list into pieces, and
 runs one `master --targetList <piece>` job per piece — in parallel, with
-per-piece resume.
+per-piece resume. Rewritten from `master_search.sh` in Python (tqdm progress bar);
+the CLI is identical.
 
 Two design facts that drive every parameter below:
 
-1. **The split is the resume base.** `--target-num-per-list` chops the
+1. **The split is the resume base.** `--chunk-size` chops the
    `--targetList` into consecutive pieces. Each piece gets a `.done.<i>` sentinel
    after it finishes; re-running the same command reuses every finished piece and
    only searches the unfinished ones. Nothing about the split itself is
@@ -24,24 +25,32 @@ out/
   match.txt          final merged match-address file (one line per match)
   seqs.txt           merged match sequences (only if --seqOut given)
   structs/           match structures in PDB format (unless --no-structs)
+    piece.<i>/       per-piece subdir: match1.pdb, match2.pdb, ... (see below)
+  pieces/
+    piece.<i>/match.txt   piece i's matches        (before merge)
+    piece.<i>/seq.txt     piece i's match sequences (before merge)
   master_search.log  run log
-  .chunks/
+  .chunks/           work/metadata only — NO result files
     targets.<i>      piece i's slice of the targetList
-    match.<i>        piece i's matches        (before merge)
-    seq.<i>          piece i's match sequences (before merge)
     run.<i>.log      piece i's master stdout/stderr
-    .done.<i>        sentinel: piece i finished
-    fingerprint      hash of (targetList + --target-num-per-list)
+    done.<i>         sentinel: piece i finished
+    fingerprint      hash of (targetList + --chunk-size)
 ```
+
+`master` names every piece's output structures `match1.pdb, match2.pdb, ...`
+(numbered from 1, regardless of the target — see `Search.cpp` `renameStruct`).
+Writing all pieces into ONE flat `--structOut` dir would make concurrent pieces
+clobber each other's `matchN.pdb`, so each piece writes into its own
+`structs/piece.<i>/` subdir instead.
 
 ---
 
 ## Full usage
 
 ```
-bash master_search.sh \
+python3 master_search.py \
   --query <q.pds> --targetList <list> --rmsdCut <X> --out <dir> \
-  [--target-num-per-list N] [--njobs N] \
+  [--chunk-size N] [--njobs N] \
   [--bbRMSD] [--topN N] [--minN N] [--gapLen S] [--outType T] \
   [--seqOut FILE] [--no-structs] [--structOut DIR] [--matchOut FILE] \
   [--master PATH] [--force]
@@ -84,7 +93,7 @@ is the file that gets split into pieces.
 
 - **Input:** e.g. `target_list.txt` produced by `create_master_db.sh`'s
   `gen_target_list` step, or any hand-written list of target PDS files.
-- **Effect:** split into `ceil(lines / --target-num-per-list)` consecutive slices
+- **Effect:** split into `ceil(lines / --chunk-size)` consecutive slices
   (preserving the file's order — it is never sorted). Each slice becomes one
   piece's `master --targetList`.
 - **Error if:** missing → `targetList not found`. Empty → logs
@@ -129,7 +138,7 @@ Root directory for all outputs (merged results and the `.chunks/` work area).
 
 ## Splitting & concurrency
 
-### `--target-num-per-list <N>`
+### `--chunk-size <N>`
 
 **Structures per piece.** The full `--targetList` is divided into consecutive
 pieces of up to N entries each (the last piece may be smaller). This is the
@@ -139,7 +148,7 @@ pieces of up to N entries each (the last piece may be smaller). This is the
 - **Effect on piece count:** `number_of_pieces = ceil(lines / N)`.
 
 ```
-# 5 targets (1azw,1b72a,1ju3,1l7a,1pq5), --target-num-per-list 2
+# 5 targets (1azw,1b72a,1ju3,1l7a,1pq5), --chunk-size 2
 -> pieces=3 : [1azw,1b72a] [1ju3,1l7a] [1pq5]
 ```
 
@@ -246,8 +255,8 @@ Final **merged** match-address file (one line per match).
 
 - **Input:** an output path. Default `$out/match.txt`.
 - **Effect:** after all pieces finish (or resume), each `.done` piece's
-  `match.$i` is concatenated in piece order into this file. Every line records a
-  match: RMSD, target entry, and aligned residues.
+  `pieces/piece.<i>/match.txt` is concatenated in piece order into this file.
+  Every line records a match: RMSD, target entry, and aligned residues.
 - **Example line:**
   ```
    0.61906 targets/1b72a.pds [(13,61)]
@@ -260,16 +269,18 @@ Final **merged** match-address file (one line per match).
 Also write match sequences, **merged** to this file. Off by default.
 
 - **Input:** an output path, e.g. `--seqOut out/seqs.txt`.
-- **Effect:** each `.done` piece's `seq.$i` is concatenated into the file (same
-  order as matches). One line per match: RMSD then the sequence.
+- **Effect:** each `.done` piece's `pieces/piece.<i>/seq.txt` is concatenated
+  into the file (same order as matches). One line per match: RMSD then the
+  sequence.
 - **Example line:**
   ```
    0.61906 PHE THR THR ARG GLN LEU THR GLU LEU ...
   ```
-- **Resume caveat:** per-piece `seq.$i` is only written on a run where `--seqOut`
-  is active. If you first search without `--seqOut` (pieces now `.done`) and then
-  re-run *with* `--seqOut`, those pieces are skipped and produce no `seq.$i`, so
-  the merged seqs file comes back empty — add `--force` to regenerate.
+- **Resume caveat:** per-piece `seq.txt` is only written on a run where
+  `--seqOut` is active. If you first search without `--seqOut` (pieces now
+  `.done`) and then re-run *with* `--seqOut`, those pieces are skipped and
+  produce no `seq.txt`, so the merged seqs file comes back empty — add `--force`
+  to regenerate.
 
 ### `--structOut <dir>`
 
@@ -277,10 +288,12 @@ Directory for match **structures** in PDB format (one PDB per match, written
 optimally superimposed onto the query over the matching region).
 
 - **Input:** an output dir. Default `$out/structs`.
-- **Effect:** every piece writes into this **same** directory. This is safe
-  because pieces are disjoint target sets → match filenames never collide across
-  pieces. The region written is governed by `--outType`.
-- **Example produced file:** `structs/match1.pdb`.
+- **Effect:** `master` numbers every piece's output `match1.pdb, match2.pdb, ...`
+  starting from 1 (it does **not** name files after the target — see `Search.cpp`
+  `renameStruct`). Writing all pieces into ONE flat dir would make concurrent
+  pieces overwrite each other's `matchN.pdb`, so each piece writes into its own
+  `--structOut/piece.<i>/` subdir. The region written is governed by `--outType`.
+- **Example produced file:** `structs/piece.1/match1.pdb`.
 
 ### `--outType <t>`
 
@@ -343,10 +356,10 @@ Flag. Reprocess every piece even if `.done` sentinels exist.
 Build a 3-piece search and show the piece split:
 
 ```
-# 11 targets -> --target-num-per-list 4 => 3 pieces: [4][4][3]
-bash snippet/master_search.sh \
+# 11 targets -> --chunk-size 4 => 3 pieces: [4][4][3]
+python3 snippet/master_search.py \
   --query query/1akha.pds --targetList db/target_list.txt --rmsdCut 3.0 \
-  --out searches/a --njobs 3 --target-num-per-list 4 \
+  --out searches/a --njobs 3 --chunk-size 4 \
   --bbRMSD --topN 5000 --seqOut searches/a/seqs.txt
 ```
 
@@ -364,7 +377,7 @@ Searching 11 targets ... (pieces=3, per-piece<=4, njobs=3 cap, rmsdCut=3.0)
 You are interrupted after pieces 1–2 finish. Rerun the **same command**:
 
 ```
-Resuming: --targetList / --target-num-per-list unchanged since previous run.
+Resuming: --targetList / --chunk-size unchanged since previous run.
   piece 1: already done (resume skip)
   piece 2: already done (resume skip)
   piece 3: OK (1 match)
@@ -384,7 +397,7 @@ the union of all `.done` pieces.
 | `--targetList` | — | required | DB list of target PDS files, split into pieces |
 | `--rmsdCut` | — | required | RMSD cutoff (Å) for a match |
 | `--out` | — | required | output root |
-| `--target-num-per-list` | `10000` | int | structures per piece = resume granularity |
+| `--chunk-size` | `10000` | int | structures per piece = resume granularity |
 | `--njobs` | `8` | int | max concurrent pieces (cap only) |
 | `--bbRMSD` | off | flag | full-backbone RMSD metric |
 | `--topN` | `0` | int | keep best N matches (per piece) |
